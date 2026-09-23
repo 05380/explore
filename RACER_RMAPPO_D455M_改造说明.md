@@ -59,7 +59,7 @@ linear.z  垂向速度
 angular.z yaw 角速度
 ```
 
-范围应为 `[-1, 1]`。默认物理上限为前进 1.5 m/s、后退 0.5 m/s、横向 0.8 m/s、垂向 0.5 m/s、yaw 1.0 rad/s。桥接节点只做坐标变换、限幅、飞行边界限制和 0.3 s 命令超时悬停，不查询地图，也不替策略规划避障路径。
+范围应为 `[-1, 1]`。默认物理上限为前进 2.0 m/s、后退 0.5 m/s、横向 0.8 m/s、垂向 0.5 m/s、yaw 1.0 rad/s，并对三维平移速度做 2.0 m/s 模长硬限幅。桥接节点只做坐标变换、限幅、飞行边界限制和 0.3 s 命令超时悬停，不查询地图，也不替策略规划避障路径。
 
 输出：
 
@@ -85,7 +85,7 @@ uav_simulator/local_sensing/params/camera_d455m_640x360.yaml
 - 最小建图深度：0.9 m；
 - 体素分辨率：0.5 m；
 - 地图范围：150 m × 150 m × 5 m；
-- 障碍膨胀：0.75 m；
+- 障碍膨胀：0.5 m（当前 0.5 m 体素下为 1 个体素步长）；
 - 有效飞行高度：0.5–4.5 m；
 - HGrid 边长：10 m。
 
@@ -139,9 +139,9 @@ roslaunch exploration_manager swarm_exploration_rl_d455m_16.launch
 swarm_exploration/exploration_manager/config/rmappo_d455m_16.yaml
 ```
 
-## 4. Isaac Sim / navrl-training 应如何继续实现
+## 4. Isaac Sim / RMAPPO 训练端
 
-当前工作区完成的是 RACER–RL 接口、地图参数和在线融合，不包含已经训练好的模型，也没有把 Isaac Sim 环境复制进 RACER。建议在 `navrl-training` 中按以下顺序改造。
+`training/training/racer_rmappo` 已新增共享 GRU actor、集中式 critic、递归 PPO 更新、奖励组合、合同测试环境、评估和 TorchScript 导出。详细运行方式见 `training/README_RMAPPO.md`。当前仍不包含训练好的模型；高保真 Isaac backend 尚未接入，合同环境只用于验证张量和算法循环，不能代替避障训练。
 
 ### 4.1 先做单机局部导航任务
 
@@ -249,6 +249,13 @@ UDP 丢包是正常事件。当前协议依靠周期 stamp 和缺块查询最终
 - `swarm_exploration/plan_env/src/multi_map_manager.cpp`
 - `swarm_exploration/plan_env/msg/ChunkStamps.msg`
 - `uav_simulator/local_sensing/params/camera_d455m_640x360.yaml`
+- `training/training/racer_rmappo/`（共享 actor、集中式 critic、奖励、rollout 和环境合同）
+- `training/training/scripts/train_rmappo.py`
+- `training/training/scripts/eval_rmappo.py`
+- `training/training/scripts/export_rmappo_actor.py`
+- `training/training/scripts/diagnose_rmappo.py`
+- `training/training/tests/test_racer_rmappo.py`
+- `training/README_RMAPPO.md`
 
 ## 7. 验收顺序
 
@@ -261,3 +268,23 @@ UDP 丢包是正常事件。当前协议依靠周期 stamp 和缺块查询最终
 7. 最后才上真机，先低速、软障碍、保护网和人工急停，再逐步提高速度与范围。
 
 由于当前执行环境没有 ROS/catkin 工具链，本次只能完成代码静态检查和 launch XML 语法检查，尚未在本机完成 catkin 编译、ROS topic 联调或 Isaac Sim 训练。第一次在 ROS 工作站构建时，应完整清理对应包的旧消息生成缓存后重新 `catkin_make`。
+
+## 8. 当前关键参数与训练端状态（续改）
+
+当前运行/部署参数：
+
+- 编队规模 16，最终空间 150×150×5 m，飞行高度 0.5–4.5 m；
+- D455M 深度 640×360，约 58°×35°，有效范围 0.9–20 m；actor 输入为 3 帧 64×40 inverse-depth；
+- 体素 0.5 m，障碍膨胀 0.5 m；深度建图每 4 像素抽样一次；
+- HGrid 10 m，通信半径 30 m，chunk 200 体素，尾块 0.25 s 刷新，默认 UDPROS；
+- 控制 20 Hz，动作超时 0.30 s，平移合速度硬上限 2.0 m/s；前向 2.0、后向 0.5、横向 0.8、垂向 0.5 m/s，yaw 1.0 rad/s；
+- RACER target 默认每 2 s 可重规划，1 m 内视为到达；
+- RMAPPO rollout 256，递归序列 32，PPO epoch 5，minibatch 8，`gamma=0.99`，`GAE=0.95`，clip 0.2，学习率 3e-4，GRU hidden 256；
+- 新体素奖励分别按本机/团队唯一体素计数，但单步各封顶 1.0，重复观测惩罚单步最多 0.25；
+- 近障碍奖励距离从低速 1.0 m 随速度按反应距离和制动距离增大，在 2 m/s 时封顶 3.5 m。
+
+`training/training/racer_rmappo` 现在可以运行无 Isaac 依赖的合同冒烟训练，用于发现维度、递归状态、PPO 更新和奖励数值错误。它不是飞行动力学训练环境。高保真 Isaac backend、真实 D455 深度渲染、楼房/树木碰撞体以及 ROS actor 推理节点仍需在 Ubuntu + NVIDIA 训练机上继续接入。不要把 smoke checkpoint 部署到无人机。
+
+地图融合发生在探索过程中。结束时只需停止新任务、等待 chunk 缺块补齐和 stamp 收敛，然后保存 union map；如果各机 world/VIO 坐标未对齐，则必须先做坐标对齐，不能靠 chunk 合并消除重影。
+
+训练、诊断、评估和导出命令以及逐项排错方法见 `training/README_RMAPPO.md`。

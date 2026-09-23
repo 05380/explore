@@ -34,6 +34,7 @@ pip install moviepy==1.0.3
 pip install pyyaml
 pip install rospkg
 pip install matplotlib
+pip install pytest
 
 # Step 2: Install dependencies
 echo "Installing system dependencies..."
@@ -82,4 +83,3 @@ python setup.py develop
 python -c "import torch; print(torch.__path__)"
 
 echo "Setup completed successfully!"
-

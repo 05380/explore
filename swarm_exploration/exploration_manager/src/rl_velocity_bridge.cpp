@@ -26,10 +26,11 @@ public:
     pnh_.param("command_timeout", command_timeout_, 0.30);
     pnh_.param("lookahead_time", lookahead_time_, 0.05);
     pnh_.param("normalized_action", normalized_action_, true);
-    pnh_.param("max_forward_speed", max_forward_speed_, 1.5);
+    pnh_.param("max_forward_speed", max_forward_speed_, 2.0);
     pnh_.param("max_backward_speed", max_backward_speed_, 0.5);
     pnh_.param("max_lateral_speed", max_lateral_speed_, 0.8);
     pnh_.param("max_vertical_speed", max_vertical_speed_, 0.5);
+    pnh_.param("max_speed_norm", max_speed_norm_, 2.0);
     pnh_.param("max_yaw_rate", max_yaw_rate_, 1.0);
     pnh_.param("min_x", min_x_, -74.5);
     pnh_.param("max_x", max_x_, 74.5);
@@ -41,6 +42,7 @@ public:
     control_rate_ = std::max(1.0, control_rate_);
     command_timeout_ = std::max(0.05, command_timeout_);
     lookahead_time_ = std::max(0.01, lookahead_time_);
+    max_speed_norm_ = std::max(0.0, max_speed_norm_);
 
     cmd_sub_ = nh_.subscribe(
         "/rl_navigation/cmd_vel_body", 1, &RLVelocityBridge::commandCallback, this,
@@ -96,6 +98,15 @@ private:
       ROS_WARN_THROTTLE(1.0, "RL action timeout: publishing hover command");
     }
 
+    const double speed_norm = std::sqrt(
+        vx_body * vx_body + vy_body * vy_body + vz * vz);
+    if (max_speed_norm_ > 0.0 && speed_norm > max_speed_norm_) {
+      const double scale = max_speed_norm_ / speed_norm;
+      vx_body *= scale;
+      vy_body *= scale;
+      vz *= scale;
+    }
+
     const double yaw = yawFromQuaternion(odometry_.pose.pose.orientation);
     const double c = std::cos(yaw);
     const double s = std::sin(yaw);
@@ -142,6 +153,7 @@ private:
   bool normalized_action_;
   double control_rate_, command_timeout_, lookahead_time_;
   double max_forward_speed_, max_backward_speed_, max_lateral_speed_, max_vertical_speed_;
+  double max_speed_norm_;
   double max_yaw_rate_;
   double min_x_, max_x_, min_y_, max_y_, min_z_, max_z_;
 };

@@ -36,13 +36,13 @@
     <arg name="cy" value="$(arg cy)"/>
     <arg name="fx" value="$(arg fx)"/>
     <arg name="fy" value="$(arg fy)"/>
-    <arg name="max_vel" value="1.5"/>
+    <arg name="max_vel" value="2.0"/>
     <arg name="max_acc" value="1.0"/>
     <arg name="simulation" value="$(arg simulation)"/>
 
     <arg name="use_rl_navigation" value="true"/>
     <arg name="map_resolution" value="0.5"/>
-    <arg name="obstacles_inflation" value="0.75"/>
+    <arg name="obstacles_inflation" value="0.5"/>
     <arg name="local_map_margin" value="10"/>
     <arg name="ground_height" value="0.0"/>
     <arg name="sensor_min_range" value="0.9"/>
@@ -84,10 +84,11 @@
     <param name="control_rate" value="20.0"/>
     <param name="command_timeout" value="0.30"/>
     <param name="lookahead_time" value="0.05"/>
-    <param name="max_forward_speed" value="1.5"/>
+    <param name="max_forward_speed" value="2.0"/>
     <param name="max_backward_speed" value="0.5"/>
     <param name="max_lateral_speed" value="0.8"/>
     <param name="max_vertical_speed" value="0.5"/>
+    <param name="max_speed_norm" value="2.0"/>
     <param name="max_yaw_rate" value="1.0"/>
     <param name="min_x" value="-74.5"/>
     <param name="max_x" value="74.5"/>
