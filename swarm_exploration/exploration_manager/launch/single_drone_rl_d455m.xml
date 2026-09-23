@@ -1,0 +1,113 @@
+<launch>
+  <!-- RACER performs partition/allocation and viewpoint selection; PPO performs local navigation. -->
+  <arg name="drone_id" default="1"/>
+  <arg name="drone_num" default="16"/>
+  <arg name="init_x" default="0.0"/>
+  <arg name="init_y" default="0.0"/>
+  <arg name="init_z" default="1.5"/>
+  <arg name="map_size_x" default="150.0"/>
+  <arg name="map_size_y" default="150.0"/>
+  <arg name="map_size_z" default="5.0"/>
+  <arg name="simulation" default="true"/>
+  <arg name="odom_prefix" default="/odom"/>
+  <arg name="odometry_topic" default="$(arg odom_prefix)_$(arg drone_id)"/>
+  <arg name="sensor_pose_topic" default="/pcl_render_node/sensor_pose_$(arg drone_id)"/>
+  <arg name="depth_topic" default="/pcl_render_node/depth_$(arg drone_id)"/>
+  <arg name="cloud_topic" default="/pcl_render_node/cloud_$(arg drone_id)"/>
+  <arg name="camera_config" default="$(find local_sensing_node)/params/camera_d455m_640x360.yaml"/>
+
+  <!-- Approximate 640x360 intrinsics. Override with calibrated CameraInfo values on the vehicle. -->
+  <arg name="cx" default="319.5"/>
+  <arg name="cy" default="179.5"/>
+  <arg name="fx" default="577.296"/>
+  <arg name="fy" default="570.840"/>
+
+  <include file="$(find exploration_manager)/launch/single_drone_planner.xml">
+    <arg name="drone_id" value="$(arg drone_id)"/>
+    <arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/>
+    <arg name="map_size_y" value="$(arg map_size_y)"/>
+    <arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="odometry_topic" value="$(arg odometry_topic)"/>
+    <arg name="sensor_pose_topic" value="$(arg sensor_pose_topic)"/>
+    <arg name="depth_topic" value="$(arg depth_topic)"/>
+    <arg name="cloud_topic" value="$(arg cloud_topic)"/>
+    <arg name="cx" value="$(arg cx)"/>
+    <arg name="cy" value="$(arg cy)"/>
+    <arg name="fx" value="$(arg fx)"/>
+    <arg name="fy" value="$(arg fy)"/>
+    <arg name="max_vel" value="1.5"/>
+    <arg name="max_acc" value="1.0"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+
+    <arg name="use_rl_navigation" value="true"/>
+    <arg name="map_resolution" value="0.5"/>
+    <arg name="obstacles_inflation" value="0.75"/>
+    <arg name="local_map_margin" value="10"/>
+    <arg name="ground_height" value="0.0"/>
+    <arg name="sensor_min_range" value="0.9"/>
+    <arg name="sensor_max_range" value="20.0"/>
+    <arg name="depth_skip_pixel" value="4"/>
+    <arg name="box_min_x" value="-75.0"/>
+    <arg name="box_min_y" value="-75.0"/>
+    <arg name="box_min_z" value="0.0"/>
+    <arg name="box_max_x" value="75.0"/>
+    <arg name="box_max_y" value="75.0"/>
+    <arg name="box_max_z" value="5.0"/>
+    <arg name="fov_top_angle" value="0.305433"/>
+    <arg name="fov_left_angle" value="0.506145"/>
+    <arg name="fov_right_angle" value="0.506145"/>
+
+    <!-- Counts are scaled for 0.5 m voxels; retune from logged frontier statistics. -->
+    <arg name="partition_grid_size" value="10.0"/>
+    <arg name="partition_min_unknown" value="200"/>
+    <arg name="partition_min_frontier" value="4"/>
+    <arg name="partition_min_free" value="25"/>
+    <arg name="frontier_cluster_min" value="4"/>
+    <arg name="frontier_min_visib_num" value="6"/>
+    <arg name="frontier_min_clearance" value="0.75"/>
+    <arg name="rl_target_replan_period" value="2.0"/>
+    <arg name="rl_target_reached_dist" value="1.0"/>
+    <arg name="map_chunk_size" value="200"/>
+    <arg name="map_chunk_flush_interval" value="0.25"/>
+    <arg name="map_use_udpros" value="true"/>
+    <arg name="map_communication_range" value="30.0"/>
+  </include>
+
+  <!-- The actor publishes normalized body-frame actions in TwistStamped. -->
+  <node pkg="exploration_manager" name="rl_velocity_bridge_$(arg drone_id)"
+        type="rl_velocity_bridge" output="screen">
+    <remap from="/odom_world" to="$(arg odometry_topic)"/>
+    <remap from="/rl_navigation/cmd_vel_body" to="/rl_navigation/cmd_vel_body_$(arg drone_id)"/>
+    <remap from="/rl_navigation/position_cmd" to="/planning/pos_cmd_$(arg drone_id)"/>
+    <param name="normalized_action" value="true"/>
+    <param name="control_rate" value="20.0"/>
+    <param name="command_timeout" value="0.30"/>
+    <param name="lookahead_time" value="0.05"/>
+    <param name="max_forward_speed" value="1.5"/>
+    <param name="max_backward_speed" value="0.5"/>
+    <param name="max_lateral_speed" value="0.8"/>
+    <param name="max_vertical_speed" value="0.5"/>
+    <param name="max_yaw_rate" value="1.0"/>
+    <param name="min_x" value="-74.5"/>
+    <param name="max_x" value="74.5"/>
+    <param name="min_y" value="-74.5"/>
+    <param name="max_y" value="74.5"/>
+    <param name="min_z" value="0.5"/>
+    <param name="max_z" value="4.5"/>
+  </node>
+
+  <include file="$(find exploration_manager)/launch/simulator_light.xml" if="$(arg simulation)">
+    <arg name="drone_id" value="$(arg drone_id)"/>
+    <arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="$(arg init_x)"/>
+    <arg name="init_y" value="$(arg init_y)"/>
+    <arg name="init_z" value="$(arg init_z)"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/>
+    <arg name="map_size_y" value="$(arg map_size_y)"/>
+    <arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="odometry_topic" value="$(arg odometry_topic)"/>
+    <arg name="camera_config" value="$(arg camera_config)"/>
+    <arg name="sensing_horizon" value="20.0"/>
+  </include>
+</launch>

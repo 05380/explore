@@ -1,0 +1,124 @@
+# Design contract for the Isaac Sim trainer/inference node. This file is not
+# loaded by the ROS C++ nodes; keep the trainer and deployment preprocessing identical.
+experiment:
+  algorithm: rmappo
+  num_agents: 16
+  shared_actor: true
+  centralized_critic_during_training: true
+  decentralized_execution: true
+  control_hz: 20
+  episode_seconds: 600
+
+world:
+  size_m: [150.0, 150.0, 5.0]
+  voxel_resolution_m: 0.5
+  min_flight_z_m: 0.5
+  max_flight_z_m: 4.5
+  randomization:
+    buildings: [8, 30]
+    trees: [30, 180]
+    walls: [0, 25]
+    depth_dropout_probability: [0.0, 0.08]
+    depth_noise_std_m: [0.0, 0.05]
+    action_delay_steps: [0, 2]
+    communication_delay_ms: [0, 250]
+    communication_drop_probability: [0.0, 0.20]
+
+camera:
+  model: PXYZ-D455M
+  width: 640
+  height: 360
+  horizontal_fov_deg: 58.0
+  vertical_fov_deg: 35.0
+  min_depth_m: 0.9
+  max_depth_m: 20.0
+  # Approximate values for simulation only; deployment must use calibrated CameraInfo.
+  fx: 577.296
+  fy: 570.840
+  cx: 319.5
+  cy: 179.5
+
+actor_observation:
+  depth:
+    representation: inverse_depth
+    resize: [64, 40]
+    frame_stack: 3
+    invalid_value: 0.0
+    normalize_range_m: [0.9, 20.0]
+  ego_state:
+    fields: [body_velocity_xyz, roll_pitch, yaw_sin_cos, previous_action]
+  racer_target:
+    fields: [relative_body_xyz, relative_distance, target_yaw_sin_cos, return_home]
+    distance_normalizer_m: 20.0
+  neighbors:
+    max_neighbors: 5
+    communication_radius_m: 30.0
+    fields: [relative_body_xyz, relative_body_velocity_xyz, age, valid]
+
+action:
+  topic_template: /rl_navigation/cmd_vel_body_{drone_id}
+  message: geometry_msgs/TwistStamped
+  normalized_range: [-1.0, 1.0]
+  fields: [linear_x, linear_y, linear_z, angular_z]
+  physical_limits:
+    forward_mps: 1.5
+    backward_mps: 0.5
+    lateral_mps: 0.8
+    vertical_mps: 0.5
+    yaw_rate_rps: 1.0
+
+reward:
+  # Log every component independently before tuning aggregate scale.
+  collision_terminal: -20.0
+  out_of_bounds_terminal: -20.0
+  goal_reached: 5.0
+  target_progress_per_m: 2.5
+  newly_observed_local_voxel: 0.02
+  newly_observed_team_unique_voxel: 0.005
+  duplicate_observation_voxel: -0.002
+  near_obstacle:
+    safe_clearance_m: 1.0
+    weight: -1.5
+  inter_drone_separation:
+    safe_distance_m: 2.0
+    weight: -2.0
+  action_delta_l2: -0.02
+  vertical_action_l2: -0.005
+  step: -0.002
+  stall:
+    window_seconds: 3.0
+    min_displacement_m: 0.25
+    penalty: -1.0
+  team_coverage_milestones:
+    0.50: 5.0
+    0.75: 10.0
+    0.90: 20.0
+    0.98: 40.0
+
+ppo:
+  rollout_steps: 256
+  epochs: 5
+  minibatches: 8
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_ratio: 0.2
+  entropy_coefficient: 0.01
+  value_coefficient: 0.5
+  learning_rate: 0.0003
+  max_grad_norm: 0.5
+  recurrent: true
+  recurrent_hidden_size: 256
+
+curriculum:
+  - name: single_agent_sparse_static
+    agents: 1
+    world_size_m: [30.0, 30.0, 5.0]
+  - name: four_agent_dense_static
+    agents: 4
+    world_size_m: [60.0, 60.0, 5.0]
+  - name: eight_agent_comm_randomization
+    agents: 8
+    world_size_m: [100.0, 100.0, 5.0]
+  - name: sixteen_agent_full
+    agents: 16
+    world_size_m: [150.0, 150.0, 5.0]

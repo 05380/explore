@@ -1,0 +1,112 @@
+<launch>
+  <!-- Lightweight ROS integration test. Isaac Sim training should provide its own odometry/depth. -->
+  <arg name="map_size_x" default="150.0"/>
+  <arg name="map_size_y" default="150.0"/>
+  <arg name="map_size_z" default="5.0"/>
+  <arg name="drone_num" default="16"/>
+  <arg name="simulation" default="true"/>
+  <arg name="map_file" default="$(find map_generator)/resource/pillar.pcd"/>
+
+  <node pkg="map_generator" name="map_pub" type="map_pub" output="screen"
+        args="$(arg map_file)" if="$(arg simulation)"/>
+
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="1"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="-6"/><arg name="init_y" value="-6"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="2"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="-2"/><arg name="init_y" value="-6"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="3"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="2"/><arg name="init_y" value="-6"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="4"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="6"/><arg name="init_y" value="-6"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="5"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="-6"/><arg name="init_y" value="-2"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="6"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="-2"/><arg name="init_y" value="-2"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="7"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="2"/><arg name="init_y" value="-2"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="8"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="6"/><arg name="init_y" value="-2"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="9"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="-6"/><arg name="init_y" value="2"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="10"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="-2"/><arg name="init_y" value="2"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="11"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="2"/><arg name="init_y" value="2"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="12"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="6"/><arg name="init_y" value="2"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="13"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="-6"/><arg name="init_y" value="6"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="14"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="-2"/><arg name="init_y" value="6"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="15"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="2"/><arg name="init_y" value="6"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+  <include file="$(find exploration_manager)/launch/single_drone_rl_d455m.xml">
+    <arg name="drone_id" value="16"/><arg name="drone_num" value="$(arg drone_num)"/>
+    <arg name="init_x" value="6"/><arg name="init_y" value="6"/><arg name="init_z" value="1.5"/>
+    <arg name="map_size_x" value="$(arg map_size_x)"/><arg name="map_size_y" value="$(arg map_size_y)"/><arg name="map_size_z" value="$(arg map_size_z)"/>
+    <arg name="simulation" value="$(arg simulation)"/>
+  </include>
+</launch>

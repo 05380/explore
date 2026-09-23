@@ -1,0 +1,9 @@
+# PiXel XYZ D455M simulation profile.
+# Derived from the nominal 58 deg (H) x 35 deg (V) FOV at 640 x 360.
+# Replace these approximate intrinsics with the factory CameraInfo values on real hardware.
+cam_width: 640
+cam_height: 360
+cam_fx: 577.296
+cam_fy: 570.840
+cam_cx: 319.5
+cam_cy: 179.5
