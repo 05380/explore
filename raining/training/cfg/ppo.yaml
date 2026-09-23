@@ -1,0 +1,38 @@
+algo:
+  feature_extractor:
+    learning_rate: 5e-4
+    dyn_obs_num: 5
+    auxiliary:
+      enabled: true
+      loss_weight: 0.1
+      hidden_dim: 128
+      future_horizons: [1, 3, 5]
+      future_collision_weight: 1.0
+      future_stuck_weight: 1.0
+      future_clearance_weight: 1.0
+      future_progress_weight: 1.0
+    behavior_cloning:
+      enabled: true
+      loss_weight: 0.05
+      batch_size: 256
+      min_buffer_size: 4096
+      updates_per_iteration: 8
+      max_log_prob: 10.0
+      max_nll: 30.0
+      buffer_capacity: 100000
+      balanced_sampling: true
+      phase_balance_exponent: 0.5
+  
+  actor:
+    learning_rate: 5e-4
+    clip_ratio: 0.1
+    action_limit: 2.0 # m/s
+  
+  critic:
+    learning_rate: 5e-4
+    clip_ratio: 0.1
+  
+  entropy_loss_coefficient: 1e-3 # encourage exploration
+  training_frame_num: 32
+  training_epoch_num: 4
+  num_minibatches: 16 # split into N minibatches

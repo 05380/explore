@@ -1,0 +1,203 @@
+defaults:
+  - _self_
+  - drone
+  - ppo
+  - sim
+
+headless: False
+device: "cuda:0"
+seed: 0
+checkpoint:
+eval_style: opposite_crossing_eval # opposite_crossing_eval, wall_crossing_eval, or standard_eval
+train_style: opposite_crossing # opposite_crossing or wall_crossing
+
+# Total Training Length
+max_frame_num: 14e8 # max frame 
+eval_interval: 1000 # evaluate the policy for every N training steps
+save_interval: 1000
+
+# Training Environment
+env:
+  num_envs: 2 # Number of drones for training
+  max_episode_length: 2200
+  env_spacing: 8.0 
+  num_obstacles: 350
+  wall_style: 0 # 0: original, 1: 1 single, 2: 2 singles, 3: 3 singles, 4: 2 singles+1 L, 5: 3 singles+1 L, 6: 2 singles+1 L+1 U, 7: 2 singles+1 L+2 U
+  wall:
+    length_range: [5.0, 7.0, 10.0, 12.0]
+    length_probability: [0.10, 0.10, 0.80]
+    l_length_range: [8.0, 10.0]
+    u_width_range: [10.0, 12.0]
+    u_depth_range: [3.5, 6.5]
+    thickness_range: [0.35, 0.65]
+    height_range: [3.9, 4.0, 6.0]
+    height_probability: [0.0, 1.0]
+    placement_margin: 4.0
+    min_separation: 4.0
+    obstacle_clearance: 0.4
+    sampling_attempts: 500
+    spawn_clearance_radius: 1.5
+    target_clearance_radius: 1.5
+    position_sample_attempts: 128
+  task_sampling:
+    boundary_coordinate: 21.0
+    tangent_limit: 18.0
+    target_jitter: 4.0 # goal is near the opposite symmetric point; set to 0 for exact symmetry
+    horizontal_limit: 22.0
+    dynamic_clearance_radius: 1.5
+    wall_influence_radius: 2.0 # wall_crossing requires the start-goal segment to intersect this band
+    wall_line_sample_spacing: 0.25
+
+env_dyn:
+  num_obstacles: 80 # set to zero if static env is needed
+  vel_range: [0.5, 1.5]
+  local_range: [5.0, 5.0, 4.5]
+
+observation_noise:
+  enabled: true
+  train_only: true
+  observation_delay:
+    steps: 0
+  action_delay:
+    steps: 0
+  action_execution:
+    std: 0.03
+    scale_std: 0.03
+  lidar:
+    std: 0 #0.03
+    dropout_prob: 0 #0.03
+    scale_std: 0 #0.02
+    quantization: 0 #0.10
+  dynamic_obstacle:
+    position_std: 0 #0.10
+    velocity_std: 0 #0.10
+    size_std: 0 #0.05
+    dropout_prob: 0 #0.10
+    frame_dropout_prob: 0 #0.05
+
+# Training-only local wall-following teacher. A small, fixed environment pool
+# generates demonstrations and is excluded from PPO/GAE updates.
+wall_teacher:
+  enabled: true
+  env_fraction: 0.03125
+  max_envs: 32
+  trigger_steps: 20
+  trigger_progress_eps: 0.005
+  trigger_max_speed: 0.5
+  trigger_distance: 1.8
+  emergency_trigger_distance: 1.2
+  emergency_trigger_steps: 5
+  trigger_front_angle_deg: 70.0
+  trigger_normal_alignment: 0.25
+  cooldown_steps: 60
+
+  fit_elevation_indices: [1, 2]
+  fit_min_distance: 0.3
+  fit_max_distance: 4.0
+  fit_ground_min_z: -0.35
+  fit_residual_threshold: 0.15
+  fit_min_pair_separation: 0.25
+  fit_min_inliers: 5
+  fit_min_span: 1.4
+  fit_max_hypotheses: 128
+  fit_min_confidence: 0.25
+  segment_max_range_jump: 0.65
+  segment_max_point_gap: 0.85
+  segment_min_points: 5
+  tracking_continuity_weight: 0.8
+  normal_smoothing: 0.65
+  corner_angle_deg: 35.0
+  max_missing_fit_steps: 20
+
+  parallel_speed: 1.0
+  reference_clearance: 1.0
+  clearance_gain: 1.2
+  max_toward_wall_speed: 0.2
+  max_away_wall_speed: 0.8
+  height_gain: 0.6
+  max_vertical_speed: 0.5
+  action_smoothing: 0.40
+  side_goal_weight: 1.0
+  side_clearance_weight: 0.8
+  side_velocity_weight: 0.25
+  side_clearance_angle_deg: 35.0
+  leave_goal_speed: 1.2
+  leave_goal_blend: 0.75
+
+  min_follow_steps: 25
+  min_follow_distance: 0.5
+  min_goal_progress: 0.2
+  leave_requires_goal_progress: true
+  goal_clear_angle_deg: 18.0
+  goal_clear_steps: 8
+  max_follow_steps: 500
+  max_side_switches: 1
+
+  dynamic_width_resolution: 0.25
+  dynamic_spanning_height: 4.0
+  dynamic_point_margin: 0.25
+  dynamic_risk_limit: 0.0
+  static_sweep_horizon: 1.0
+  static_sweep_steps: 10
+  static_safety_radius: 0.40
+  static_confidence_margin: 0.30
+  static_away_speeds: [0.35, 0.70]
+  demo_min_confidence: 0.2
+  demo_min_action_speed: 0.35
+  action_epsilon: 1e-4
+
+stuck:
+  window: 60
+  progress_eps: 0.005
+  front_obstacle_distance: 1.5
+  front_angle_deg: 30.0
+  front_height: 0.75 #
+
+reward:
+  goal_progress:
+    goal_radius: 0.5
+    arrival_reward: 50.0
+    timeout_penalty: 45.0
+    progress_scale: 35.0
+  escape:
+    weight: 3.0
+    recovery_window: 180
+    cooldown_steps: 120
+    min_displacement: 0.3
+    min_goal_progress: 0.2
+    min_clearance_gain: 0.2
+  stall:
+    weight: 1.0
+    window: 60
+    ramp_window: 60
+    distance_threshold: 0.25
+    speed_threshold: 0.15
+    progress_eps: 0.005
+  vo:
+    weight: 1.3
+    tau: 0.75
+    horizon: 2.1
+    xy_margin: 0.3
+    z_margin: 0.3
+    action_weight: 0.5
+    static_weight: 0.6
+    safe_action_weight: 0.15
+    static_radius: 0.0
+    static_vertical_min: -0.35
+    reward_topk: 10
+    sphere_stack: true
+    sphere_stack_max_spheres: 0 # 0 keeps the deployment get_safe_action density: ceil(height / max(width_x, width_y))
+    sphere_stack_z_margin: 0.6
+    warmup_steps: 20000
+
+viewer:
+  eye: [0., 40., 40.]
+  lookat: [0., 2.5, 0.]
+  resolution: [960, 720]
+
+wandb:
+  project: NavRL
+  name: navigation_training
+  entity: CERLAB-UAV-RL-Navigation
+  mode: offline # online
+  run_id: #kw9xf9k9
