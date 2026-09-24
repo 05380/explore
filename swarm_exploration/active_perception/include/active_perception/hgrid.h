@@ -55,6 +55,8 @@ public:
   void checkFirstGrid(const int& id);
   int getUnknownCellsNum(const int& grid_id);
   Eigen::Vector3d getCenter(const int& grid_id);
+  bool isInAllocatedGrids(
+      const Eigen::Vector3d& pos, const vector<int>& grid_ids, double margin = 2.0);
   void getActiveGrids(vector<int>& grid_ids);
   bool isConsistent(const int& id1, const int& id2);
   double getCostDroneToGrid(

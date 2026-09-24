@@ -35,6 +35,8 @@ def test_contract_parameters_are_synchronized():
     assert cfg["world"]["obstacle_inflation_m"] == 0.5
     assert cfg["camera"]["max_depth_m"] == 20.0
     assert cfg["action"]["physical_limits"]["speed_norm_mps"] == 2.0
+    assert cfg["actor_observation"]["racer_candidates"]["max_candidates"] == 16
+    assert cfg["action"]["viewpoint_selection"]["max_position_offset_m"] == [1.0, 1.0, 0.5]
 
 
 def test_actor_critic_shapes():
@@ -46,17 +48,37 @@ def test_actor_critic_shapes():
     hidden = actor.initial_hidden(env.num_envs, env.num_agents, "cpu")
     action, log_prob, entropy, next_hidden = actor.step(observation, hidden)
     value = critic(state)
-    assert action.shape == (2, 4, 4)
+    assert action.shape == (2, 4, 9)
     assert log_prob.shape == entropy.shape == value.shape == (2, 4)
     assert next_hidden.shape == (2, 4, 32)
-    assert torch.all(action.abs() <= 1.0)
+    assert torch.all(action[..., :4].abs() <= 1.0)
+    assert torch.all(action[..., 5:].abs() <= 1.0)
+    assert observation["candidates"].shape == (2, 4, 16, 9)
+    assert observation["decision_mask"].shape == (2, 4, 1)
+    chosen = action[..., 4].round().long().unsqueeze(-1)
+    chosen_valid = torch.gather(observation["candidates"][..., -1], -1, chosen)
+    assert torch.all(chosen_valid == 1.0)
+
+
+def test_viewpoint_decision_is_event_driven():
+    cfg = small_config()
+    env = ContractSmokeEnv(cfg, "cpu")
+    observation, _ = env.reset()
+    assert torch.all(observation["decision_mask"] == 1.0)
+    action = torch.zeros(env.num_envs, env.num_agents, 9)
+    action[..., 4] = 0.0
+    next_observation, _, _, _, info = env.step(action)
+    assert info["viewpoint_decisions"].sum() == env.num_envs * env.num_agents
+    # A new decision is raised once per target reached in this step.
+    assert next_observation["decision_mask"].sum() == info["goal_reached"].sum()
 
 
 def test_smoke_backend_action_speed_and_shapes():
     cfg = small_config()
     env = ContractSmokeEnv(cfg, "cpu")
     validate_backend_shapes(env)
-    action = torch.ones(env.num_envs, env.num_agents, 4)
+    action = torch.zeros(env.num_envs, env.num_agents, 9)
+    action[..., :4] = 1.0
     _, _, reward, done, info = env.step(action)
     assert env.velocities.norm(dim=-1).max() <= 2.0 + 1e-5
     assert reward.shape == (2, 4)

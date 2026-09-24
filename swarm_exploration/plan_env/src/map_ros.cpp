@@ -38,6 +38,7 @@ void MapROS::init() {
   node_.param("map_ros/show_occ_time", show_occ_time_, false);
   node_.param("map_ros/show_esdf_time", show_esdf_time_, false);
   node_.param("map_ros/show_all_map", show_all_map_, false);
+  node_.param("map_ros/enable_esdf", enable_esdf_, true);
   node_.param("map_ros/frame_id", frame_id_, string("world"));
 
   skip_pixel_ = std::max(1, skip_pixel_);
@@ -62,7 +63,8 @@ void MapROS::init() {
   random_device rd;
   eng_ = default_random_engine(rd());
 
-  esdf_timer_ = node_.createTimer(ros::Duration(0.05), &MapROS::updateESDFCallback, this);
+  if (enable_esdf_)
+    esdf_timer_ = node_.createTimer(ros::Duration(0.05), &MapROS::updateESDFCallback, this);
   vis_timer_ = node_.createTimer(ros::Duration(0.2), &MapROS::visCallback, this);
 
   map_all_pub_ = node_.advertise<sensor_msgs::PointCloud2>("/sdf_map/occupancy_all", 10);
@@ -118,7 +120,7 @@ void MapROS::visCallback(const ros::TimerEvent& e) {
 }
 
 void MapROS::updateESDFCallback(const ros::TimerEvent& /*event*/) {
-  if (!esdf_need_update_) return;
+  if (!enable_esdf_ || !esdf_need_update_) return;
   auto t1 = ros::Time::now();
 
   map_->updateESDF3d();
@@ -166,7 +168,7 @@ void MapROS::depthPoseCallback(
 
     // ROS_WARN("Inflate time: %lf", (ros::Time::now() - t1).toSec());
 
-    esdf_need_update_ = true;
+    esdf_need_update_ = enable_esdf_;
     local_updated_ = false;
   }
 
@@ -195,7 +197,7 @@ void MapROS::cloudPoseCallback(
 
   if (local_updated_) {
     map_->clearAndInflateLocalMap();
-    esdf_need_update_ = true;
+    esdf_need_update_ = enable_esdf_;
     local_updated_ = false;
   }
 }

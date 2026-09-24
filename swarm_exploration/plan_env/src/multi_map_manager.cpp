@@ -437,7 +437,7 @@ void MultiMapManager::chunkTimerCallback(const ros::TimerEvent& e) {
   // let the normal ESDF timer consume the updated local bounds.
   if (map_->mr_->local_updated_) {
     map_->clearAndInflateLocalMap();
-    map_->mr_->esdf_need_update_ = true;
+    map_->mr_->esdf_need_update_ = map_->mr_->enable_esdf_;
     map_->mr_->local_updated_ = false;
   }
   // ROS_ERROR("chunk time: %lf", (ros::Time::now() - t1).toSec());

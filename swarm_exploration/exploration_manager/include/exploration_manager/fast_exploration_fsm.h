@@ -11,7 +11,9 @@
 #include <exploration_manager/DroneState.h>
 #include <exploration_manager/PairOpt.h>
 #include <exploration_manager/PairOptResponse.h>
+#include <exploration_manager/RLTask.h>
 #include <exploration_manager/RLTarget.h>
+#include <exploration_manager/RLViewpointSelection.h>
 #include <bspline/Bspline.h>
 
 #include <algorithm>
@@ -56,7 +58,9 @@ private:
   void clearVisMarker();
   int getId();
   void findUnallocated(const vector<int>& actives, vector<int>& missed);
-  void publishRLTarget();
+  void publishRLTask();
+  void publishRLTarget(bool active = true);
+  bool isRLTargetValid(const Vector3d& target) const;
 
   /* ROS functions */
   void FSMCallback(const ros::TimerEvent& e);
@@ -65,6 +69,8 @@ private:
   void triggerCallback(const geometry_msgs::PoseStampedConstPtr& msg);
   void odometryCallback(const nav_msgs::OdometryConstPtr& msg);
   void rlTargetTimerCallback(const ros::TimerEvent& e);
+  void rlViewpointSelectionCallback(
+      const exploration_manager::RLViewpointSelectionConstPtr& msg);
 
   // Swarm
   void droneStateTimerCallback(const ros::TimerEvent& e);
@@ -87,8 +93,8 @@ private:
   /* ROS utils */
   ros::NodeHandle node_;
   ros::Timer exec_timer_, safety_timer_, vis_timer_, frontier_timer_, rl_target_timer_;
-  ros::Subscriber trigger_sub_, odom_sub_;
-  ros::Publisher replan_pub_, new_pub_, bspline_pub_, rl_target_pub_;
+  ros::Subscriber trigger_sub_, odom_sub_, rl_selection_sub_;
+  ros::Publisher replan_pub_, new_pub_, bspline_pub_, rl_task_pub_, rl_target_pub_;
 
   // Swarm state
   ros::Publisher drone_state_pub_, opt_pub_, opt_res_pub_, swarm_traj_pub_, grid_tour_pub_,

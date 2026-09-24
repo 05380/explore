@@ -1,5 +1,5 @@
 <launch>
-  <!-- RACER performs partition/allocation and viewpoint selection; PPO performs local navigation. -->
+  <!-- RACER partitions/allocates and generates safe candidate views; PPO selects one and navigates. -->
   <arg name="drone_id" default="1"/>
   <arg name="drone_num" default="16"/>
   <arg name="init_x" default="0.0"/>
@@ -41,6 +41,7 @@
     <arg name="simulation" value="$(arg simulation)"/>
 
     <arg name="use_rl_navigation" value="true"/>
+    <arg name="enable_esdf" value="false"/>
     <arg name="map_resolution" value="0.5"/>
     <arg name="obstacles_inflation" value="0.5"/>
     <arg name="local_map_margin" value="10"/>
@@ -66,8 +67,13 @@
     <arg name="frontier_cluster_min" value="4"/>
     <arg name="frontier_min_visib_num" value="6"/>
     <arg name="frontier_min_clearance" value="0.75"/>
-    <arg name="rl_target_replan_period" value="2.0"/>
+    <arg name="rl_target_replan_period" value="20.0"/>
     <arg name="rl_target_reached_dist" value="1.0"/>
+    <arg name="rl_selection_timeout" value="2.0"/>
+    <arg name="rl_max_offset_xy" value="1.0"/>
+    <arg name="rl_max_offset_z" value="0.5"/>
+    <arg name="rl_max_yaw_offset" value="0.35"/>
+    <arg name="rl_candidate_num" value="16"/>
     <arg name="map_chunk_size" value="200"/>
     <arg name="map_chunk_flush_interval" value="0.25"/>
     <arg name="map_use_udpros" value="true"/>
@@ -78,9 +84,11 @@
   <node pkg="exploration_manager" name="rl_velocity_bridge_$(arg drone_id)"
         type="rl_velocity_bridge" output="screen">
     <remap from="/odom_world" to="$(arg odometry_topic)"/>
+    <remap from="/rl_navigation/target" to="/rl_navigation/target_$(arg drone_id)"/>
     <remap from="/rl_navigation/cmd_vel_body" to="/rl_navigation/cmd_vel_body_$(arg drone_id)"/>
     <remap from="/rl_navigation/position_cmd" to="/planning/pos_cmd_$(arg drone_id)"/>
     <param name="normalized_action" value="true"/>
+    <param name="require_active_target" value="true"/>
     <param name="control_rate" value="20.0"/>
     <param name="command_timeout" value="0.30"/>
     <param name="lookahead_time" value="0.05"/>

@@ -48,6 +48,12 @@
   <arg name="map_chunk_flush_interval" default="0.25"/>
   <arg name="map_use_udpros" default="false"/>
   <arg name="map_communication_range" default="-1.0"/>
+  <arg name="enable_esdf" default="true"/>
+  <arg name="rl_selection_timeout" default="2.0"/>
+  <arg name="rl_max_offset_xy" default="1.0"/>
+  <arg name="rl_max_offset_z" default="0.5"/>
+  <arg name="rl_max_yaw_offset" default="0.35"/>
+  <arg name="rl_candidate_num" default="16"/>
 
   <!-- main node -->
   <node pkg="exploration_manager" name="exploration_node_$(arg drone_id)" type="exploration_node" output="log">
@@ -60,6 +66,8 @@
     <remap from="/planning/new" to="/planning/new_$(arg drone_id)" />
     <remap from="/planning/bspline" to="/planning/bspline_$(arg drone_id)" />
     <remap from="/rl_navigation/target" to="/rl_navigation/target_$(arg drone_id)" />
+    <remap from="/rl_navigation/task" to="/rl_navigation/task_$(arg drone_id)" />
+    <remap from="/rl_navigation/viewpoint_selection" to="/rl_navigation/viewpoint_selection_$(arg drone_id)" />
 
     <remap from="/swarm_expl/drone_state_send" to="/swarm_expl/drone_state" />
     <remap from="/swarm_expl/drone_state_recv" to="/swarm_expl/drone_state" />
@@ -140,6 +148,7 @@
     <param name="map_ros/show_esdf_time" value="false"/>
     <param name="map_ros/show_all_map" value="true"/>
     <param name="map_ros/frame_id"      value="world"/>
+    <param name="map_ros/enable_esdf" value="$(arg enable_esdf)" type="bool"/>
 
     <!-- Fsm -->
     <param name="fsm/thresh_replan1" value="0.2" type="double"/>
@@ -158,6 +167,10 @@
     <param name="fsm/use_rl_navigation" value="$(arg use_rl_navigation)" type="bool"/>
     <param name="fsm/rl_target_replan_period" value="$(arg rl_target_replan_period)" type="double"/>
     <param name="fsm/rl_target_reached_dist" value="$(arg rl_target_reached_dist)" type="double"/>
+    <param name="fsm/rl_selection_timeout" value="$(arg rl_selection_timeout)" type="double"/>
+    <param name="fsm/rl_max_offset_xy" value="$(arg rl_max_offset_xy)" type="double"/>
+    <param name="fsm/rl_max_offset_z" value="$(arg rl_max_offset_z)" type="double"/>
+    <param name="fsm/rl_max_yaw_offset" value="$(arg rl_max_yaw_offset)" type="double"/>
 
     <param name="partitioning/min_unknown" value="$(arg partition_min_unknown)" type="int"/>;
     <param name="partitioning/min_frontier" value="$(arg partition_min_frontier)" type="int"/>;
@@ -186,6 +199,7 @@
     <param name="exploration/drone_num" value="$(arg drone_num)" type="double"/>
     <param name="exploration/drone_id" value="$(arg drone_id)" type="int"/>
     <param name="exploration/init_plan_num" value="2" type="int"/>
+    <param name="exploration/rl_candidate_num" value="$(arg rl_candidate_num)" type="int"/>
 
     <param name="frontier/cluster_min" value="$(arg frontier_cluster_min)" type="int"/>
     <param name="frontier/cluster_size_xy" value="2.0" type="double"/>

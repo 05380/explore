@@ -28,7 +28,10 @@ struct FSMData {
   ros::Time fsm_init_time_;
   ros::Time last_check_frontier_time_;
   ros::Time rl_target_plan_time_;
+  ros::Time rl_task_publish_time_;
   uint32_t rl_target_id_;
+  bool rl_waiting_for_selection_, rl_have_selected_target_;
+  int rl_selected_candidate_;
 
   Eigen::Vector3d start_pos_;
 };
@@ -41,6 +44,8 @@ struct FSMParam {
   bool use_rl_navigation_;
   double rl_target_replan_period_;
   double rl_target_reached_dist_;
+  double rl_selection_timeout_;
+  double rl_max_offset_xy_, rl_max_offset_z_, rl_max_yaw_offset_;
 
   // Swarm
   double attempt_interval_;   // Min interval of opt attempt
@@ -100,6 +105,13 @@ struct ExplorationData {
   // int prev_first_id_;
   vector<int> last_grid_ids_;
 
+  // RACER owns task allocation and candidate generation.  PPO selects one of
+  // these candidates and may add only a tightly bounded local residual.
+  vector<int> rl_task_grid_ids_, rl_task_frontier_ids_;
+  vector<Vector3d> rl_candidate_positions_;
+  vector<double> rl_candidate_yaws_;
+  vector<int> rl_candidate_frontier_ids_, rl_candidate_visible_voxels_;
+
   int plan_num_;
 };
 
@@ -114,6 +126,7 @@ struct ExplorationParam {
   string mtsp_dir_;  // resource dir of tsp solver
   double relax_time_;
   int init_plan_num_;
+  int rl_candidate_num_;
 
   // Swarm
   int drone_num_;

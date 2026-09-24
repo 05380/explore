@@ -25,9 +25,16 @@ class DeploymentActor(nn.Module):
         super().__init__()
         self.actor = actor
 
-    def forward(self, depth, ego, target, neighbors, hidden):
+    def forward(self, depth, ego, target, neighbors, candidates, decision_mask, hidden):
         action, _, _, next_hidden = self.actor.step(
-            {"depth": depth, "ego": ego, "target": target, "neighbors": neighbors},
+            {
+                "depth": depth,
+                "ego": ego,
+                "target": target,
+                "neighbors": neighbors,
+                "candidates": candidates,
+                "decision_mask": decision_mask,
+            },
             hidden,
             deterministic=True,
         )
@@ -54,11 +61,14 @@ def main() -> None:
     height = int(cfg["actor_observation"]["depth"]["resize"][1])
     width = int(cfg["actor_observation"]["depth"]["resize"][0])
     neighbors = int(cfg["actor_observation"]["neighbors"]["max_neighbors"])
+    candidates = int(cfg["actor_observation"]["racer_candidates"]["max_candidates"])
     examples = (
         torch.zeros(1, 1, frame_stack, height, width, device=args.device),
         torch.zeros(1, 1, 11, device=args.device),
         torch.zeros(1, 1, 7, device=args.device),
         torch.zeros(1, 1, neighbors, 8, device=args.device),
+        torch.zeros(1, 1, candidates, 9, device=args.device),
+        torch.ones(1, 1, 1, device=args.device),
         torch.zeros(1, 1, int(ppo["recurrent_hidden_size"]), device=args.device),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -71,7 +81,8 @@ def main() -> None:
         "camera": cfg["camera"],
         "action": cfg["action"],
         "ego_fields": cfg["actor_observation"]["ego_state"]["fields"],
-        "target_fields": cfg["actor_observation"]["racer_target"]["fields"],
+        "target_fields": cfg["actor_observation"]["selected_target"]["fields"],
+        "candidate_fields": cfg["actor_observation"]["racer_candidates"]["fields"],
         "neighbor_fields": cfg["actor_observation"]["neighbors"]["fields"],
     }
     args.output.with_suffix(args.output.suffix + ".json").write_text(

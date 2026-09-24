@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include <geometry_msgs/TwistStamped.h>
+#include <exploration_manager/RLTarget.h>
 #include <nav_msgs/Odometry.h>
 #include <quadrotor_msgs/PositionCommand.h>
 #include <ros/ros.h>
@@ -26,6 +27,7 @@ public:
     pnh_.param("command_timeout", command_timeout_, 0.30);
     pnh_.param("lookahead_time", lookahead_time_, 0.05);
     pnh_.param("normalized_action", normalized_action_, true);
+    pnh_.param("require_active_target", require_active_target_, true);
     pnh_.param("max_forward_speed", max_forward_speed_, 2.0);
     pnh_.param("max_backward_speed", max_backward_speed_, 0.5);
     pnh_.param("max_lateral_speed", max_lateral_speed_, 0.8);
@@ -49,6 +51,8 @@ public:
         ros::TransportHints().tcpNoDelay());
     odom_sub_ = nh_.subscribe("/odom_world", 10, &RLVelocityBridge::odometryCallback, this,
         ros::TransportHints().tcpNoDelay());
+    target_sub_ = nh_.subscribe("/rl_navigation/target", 1,
+        &RLVelocityBridge::targetCallback, this, ros::TransportHints().tcpNoDelay());
     position_cmd_pub_ =
         nh_.advertise<quadrotor_msgs::PositionCommand>("/rl_navigation/position_cmd", 10);
     timer_ = nh_.createTimer(ros::Duration(1.0 / control_rate_), &RLVelocityBridge::timerCallback,
@@ -67,6 +71,11 @@ private:
     have_odometry_ = true;
   }
 
+  void targetCallback(const exploration_manager::RLTargetConstPtr& msg) {
+    target_active_ = msg->active;
+    if (!target_active_) have_command_ = false;
+  }
+
   double scaleSigned(double action, double positive_limit, double negative_limit) const {
     action = clamp(action, -1.0, 1.0);
     return action >= 0.0 ? action * positive_limit : action * negative_limit;
@@ -75,7 +84,8 @@ private:
   void timerCallback(const ros::TimerEvent&) {
     if (!have_odometry_) return;
 
-    const bool stale = !have_command_ ||
+    const bool inactive = require_active_target_ && !target_active_;
+    const bool stale = inactive || !have_command_ ||
         (ros::Time::now() - last_command_time_).toSec() > command_timeout_;
     double vx_body = 0.0;
     double vy_body = 0.0;
@@ -95,7 +105,10 @@ private:
         yaw_rate = clamp(command_.twist.angular.z, -max_yaw_rate_, max_yaw_rate_);
       }
     } else {
-      ROS_WARN_THROTTLE(1.0, "RL action timeout: publishing hover command");
+      if (inactive)
+        ROS_WARN_THROTTLE(1.0, "No active RL target: publishing hover command");
+      else
+        ROS_WARN_THROTTLE(1.0, "RL action timeout: publishing hover command");
     }
 
     const double speed_norm = std::sqrt(
@@ -139,7 +152,7 @@ private:
   }
 
   ros::NodeHandle nh_, pnh_;
-  ros::Subscriber cmd_sub_, odom_sub_;
+  ros::Subscriber cmd_sub_, odom_sub_, target_sub_;
   ros::Publisher position_cmd_pub_;
   ros::Timer timer_;
 
@@ -148,6 +161,8 @@ private:
   ros::Time last_command_time_;
   bool have_command_ = false;
   bool have_odometry_ = false;
+  bool require_active_target_ = true;
+  bool target_active_ = false;
   uint32_t command_id_ = 1;
 
   bool normalized_action_;

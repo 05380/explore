@@ -58,6 +58,8 @@ def main() -> None:
             "voxel_resolution_m": cfg["world"]["voxel_resolution_m"],
             "obstacle_inflation_m": cfg["world"]["obstacle_inflation_m"],
             "speed_norm_mps": cfg["action"]["physical_limits"]["speed_norm_mps"],
+            "max_candidates": cfg["actor_observation"]["racer_candidates"]["max_candidates"],
+            "hybrid_action_fields": 9,
         }
     except Exception as exc:
         report["config"] = {"valid": False, "error": str(exc)}

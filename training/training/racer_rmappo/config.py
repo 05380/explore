@@ -59,6 +59,17 @@ def validate_config(cfg: Mapping[str, Any]) -> None:
         raise ValueError("camera.min_depth_m must be smaller than max_depth_m")
     if list(cfg["actor_observation"]["depth"]["resize"]) != [64, 40]:
         raise ValueError("deployment contract currently requires depth.resize=[64, 40]")
+    candidates = cfg["actor_observation"]["racer_candidates"]
+    if int(candidates["max_candidates"]) < 1:
+        raise ValueError("racer_candidates.max_candidates must be >= 1")
+    if int(candidates["feature_dim"]) != 9:
+        raise ValueError("deployment contract currently requires racer_candidates.feature_dim=9")
+
+    selection = cfg["action"]["viewpoint_selection"]
+    offsets = selection["max_position_offset_m"]
+    if len(offsets) != 3 or any(float(v) <= 0.0 for v in offsets):
+        raise ValueError("viewpoint_selection.max_position_offset_m must contain three positive values")
+    _positive(selection, "max_yaw_offset_rad")
 
     limits = cfg["action"]["physical_limits"]
     for key in ("speed_norm_mps", "forward_mps", "backward_mps", "lateral_mps", "vertical_mps", "yaw_rate_rps"):

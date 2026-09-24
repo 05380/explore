@@ -37,7 +37,9 @@ add_message_files(
   PairOptResponse.msg
   HGrid.msg
   GridTour.msg
+  RLTask.msg
   RLTarget.msg
+  RLViewpointSelection.msg
 )
 
 generate_messages(
@@ -84,3 +86,8 @@ target_link_libraries(ground_node
 add_executable(rl_velocity_bridge src/rl_velocity_bridge.cpp)
 add_dependencies(rl_velocity_bridge ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(rl_velocity_bridge ${catkin_LIBRARIES})
+
+catkin_install_python(PROGRAMS
+  scripts/rl_task_test_selector.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)

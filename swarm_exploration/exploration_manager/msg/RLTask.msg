@@ -1,0 +1,10 @@
+std_msgs/Header header
+uint32 task_id
+int32 drone_id
+int32[] grid_ids
+int32[] frontier_ids
+geometry_msgs/Point[] candidate_positions
+float64[] candidate_yaws
+int32[] candidate_frontier_ids
+int32[] candidate_visible_voxels
+bool return_home

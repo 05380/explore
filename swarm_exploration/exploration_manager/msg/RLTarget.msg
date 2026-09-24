@@ -5,3 +5,4 @@ geometry_msgs/Point position
 float64 yaw
 int32[] grid_ids
 bool return_home
+bool active

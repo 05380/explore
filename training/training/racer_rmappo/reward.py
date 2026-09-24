@@ -76,6 +76,9 @@ class RewardComposer:
             "collision": signals["collision"].float() * float(cfg["collision_terminal"]),
             "out_of_bounds": signals["out_of_bounds"].float() * float(cfg["out_of_bounds_terminal"]),
             "coverage_milestone": signals.get("coverage_milestone_reward", torch.zeros_like(progress)),
+            "viewpoint_gain_prior": signals.get(
+                "viewpoint_gain_prior", torch.zeros_like(progress)
+            ) * float(cfg.get("viewpoint_visible_gain_prior", 0.0)),
         }
         reward = torch.stack(tuple(components.values())).sum(dim=0)
         return reward, components

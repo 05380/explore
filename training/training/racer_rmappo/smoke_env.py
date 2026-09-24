@@ -31,6 +31,8 @@ class ContractSmokeEnv:
         self.camera = cfg["camera"]
         self.depth_cfg = cfg["actor_observation"]["depth"]
         self.neighbor_cfg = cfg["actor_observation"]["neighbors"]
+        self.candidate_cfg = cfg["actor_observation"]["racer_candidates"]
+        self.selection_cfg = cfg["action"]["viewpoint_selection"]
         self.action_limits = cfg["action"]["physical_limits"]
         self.reward_composer = RewardComposer(cfg["reward"])
         self.max_steps = int(cfg["training"].get("smoke_episode_steps", 512))
@@ -38,6 +40,7 @@ class ContractSmokeEnv:
         self.frame_stack = int(self.depth_cfg["frame_stack"])
         self.depth_width, self.depth_height = (int(v) for v in self.depth_cfg["resize"])
         self.max_neighbors = int(self.neighbor_cfg["max_neighbors"])
+        self.max_candidates = int(self.candidate_cfg["max_candidates"])
         self.communication_radius = float(self.neighbor_cfg["communication_radius_m"])
         self.drone_radius = 0.30
         self.stall_steps = max(1, int(float(cfg["reward"]["stall"]["window_seconds"]) * self.control_hz))
@@ -50,6 +53,18 @@ class ContractSmokeEnv:
         self.velocities = torch.zeros_like(self.positions)
         self.yaw = torch.zeros(self.num_envs, self.num_agents, device=self.device)
         self.targets = torch.zeros_like(self.positions)
+        self.target_yaw = torch.zeros(self.num_envs, self.num_agents, device=self.device)
+        self.candidate_positions = torch.zeros(
+            self.num_envs, self.num_agents, self.max_candidates, 3, device=self.device
+        )
+        self.candidate_yaws = torch.zeros(
+            self.num_envs, self.num_agents, self.max_candidates, device=self.device
+        )
+        self.candidate_gains = torch.zeros_like(self.candidate_yaws)
+        self.candidate_valid = torch.zeros_like(self.candidate_yaws, dtype=torch.bool)
+        self.task_decision = torch.zeros(
+            self.num_envs, self.num_agents, dtype=torch.bool, device=self.device
+        )
         self.previous_action = torch.zeros(self.num_envs, self.num_agents, 4, device=self.device)
         self.step_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.stall_count = torch.zeros(self.num_envs, self.num_agents, dtype=torch.long, device=self.device)
@@ -104,7 +119,6 @@ class ContractSmokeEnv:
         self.milestone_paid[env_ids] = False
 
         for env_id in env_ids.tolist():
-            self.targets[env_id] = self._random_positions(self.num_agents)
             self.obstacle_position[env_id] = (
                 torch.rand(self.max_obstacles, 2, device=self.device) - 0.5
             ) * (self.world_size[:2] - 3.0)
@@ -121,6 +135,38 @@ class ContractSmokeEnv:
             self.obstacle_position[env_id, too_close] += self.world_size[:2] * 0.35
             half = self.world_size[:2] * 0.5 - 1.0
             self.obstacle_position[env_id].clamp_(min=-half, max=half)
+        task_mask = torch.zeros(
+            self.num_envs, self.num_agents, dtype=torch.bool, device=self.device
+        )
+        task_mask[env_ids] = True
+        self._generate_tasks(task_mask)
+
+    def _generate_tasks(self, task_mask: Tensor) -> None:
+        """Generate fixed RACER-like candidate sets for new decision events."""
+        for env_id, agent_id in torch.nonzero(task_mask, as_tuple=False).tolist():
+            points = self._random_positions(self.max_candidates)
+            delta = points[:, None, :2] - self.obstacle_position[env_id, None, :, :]
+            clearance = delta.norm(dim=-1) - self.obstacle_radius[env_id].unsqueeze(0)
+            above = points[:, None, 2] > self.obstacle_height[env_id].unsqueeze(0)
+            clearance = clearance.masked_fill(above, float(self.camera["max_depth_m"]))
+            valid = clearance.min(dim=-1).values > (
+                self.drone_radius + float(self.cfg["world"]["obstacle_inflation_m"])
+            )
+            if not bool(valid.any()):
+                points[0] = self.positions[env_id, agent_id]
+                valid[0] = True
+            yaws = (torch.rand(self.max_candidates, device=self.device) * 2.0 - 1.0) * math.pi
+            # Synthetic visible counts stand in for RLTask.candidate_visible_voxels.
+            gains = 10.0 + torch.rand(self.max_candidates, device=self.device) * 90.0
+            gains *= valid.float()
+            self.candidate_positions[env_id, agent_id] = points
+            self.candidate_yaws[env_id, agent_id] = yaws
+            self.candidate_gains[env_id, agent_id] = gains
+            self.candidate_valid[env_id, agent_id] = valid
+            first = int(torch.nonzero(valid, as_tuple=False)[0].item())
+            self.targets[env_id, agent_id] = points[first]
+            self.target_yaw[env_id, agent_id] = yaws[first]
+            self.task_decision[env_id, agent_id] = True
 
     def reset(self) -> Tuple[Dict[str, Tensor], Tensor]:
         self._reset_envs(torch.arange(self.num_envs, device=self.device))
@@ -258,7 +304,7 @@ class ContractSmokeEnv:
         target_xy = self._body_xy(target_relative[..., :2])
         target_body = torch.cat((target_xy, target_relative[..., 2:3]), dim=-1)
         target_distance = target_relative.norm(dim=-1, keepdim=True)
-        desired_yaw = torch.atan2(target_body[..., 1], target_body[..., 0])
+        target_yaw_error = self.target_yaw - self.yaw
         ego = torch.cat(
             (
                 body_velocity / float(self.action_limits["speed_norm_mps"]),
@@ -273,9 +319,36 @@ class ContractSmokeEnv:
             (
                 target_body / float(self.depth_cfg["normalize_range_m"][1]),
                 target_distance / float(self.depth_cfg["normalize_range_m"][1]),
-                torch.sin(desired_yaw).unsqueeze(-1),
-                torch.cos(desired_yaw).unsqueeze(-1),
+                torch.sin(target_yaw_error).unsqueeze(-1),
+                torch.cos(target_yaw_error).unsqueeze(-1),
                 torch.zeros_like(target_distance),
+            ),
+            dim=-1,
+        )
+        candidate_relative = self.candidate_positions - self.positions.unsqueeze(-2)
+        cosine, sine = torch.cos(self.yaw).unsqueeze(-1), torch.sin(self.yaw).unsqueeze(-1)
+        candidate_body = torch.stack(
+            (
+                cosine * candidate_relative[..., 0] + sine * candidate_relative[..., 1],
+                -sine * candidate_relative[..., 0] + cosine * candidate_relative[..., 1],
+                candidate_relative[..., 2],
+            ),
+            dim=-1,
+        )
+        candidate_distance = candidate_relative.norm(dim=-1, keepdim=True)
+        yaw_error = self.candidate_yaws - self.yaw.unsqueeze(-1)
+        rank = torch.arange(self.max_candidates, device=self.device, dtype=torch.float32)
+        rank = rank.view(1, 1, -1, 1) / max(self.max_candidates - 1, 1)
+        rank = rank.expand(self.num_envs, self.num_agents, -1, -1)
+        candidates = torch.cat(
+            (
+                candidate_body / float(self.candidate_cfg["distance_normalizer_m"]),
+                candidate_distance / float(self.candidate_cfg["distance_normalizer_m"]),
+                torch.sin(yaw_error).unsqueeze(-1),
+                torch.cos(yaw_error).unsqueeze(-1),
+                (self.candidate_gains / float(self.candidate_cfg["visible_gain_normalizer"])).unsqueeze(-1),
+                rank,
+                self.candidate_valid.float().unsqueeze(-1),
             ),
             dim=-1,
         )
@@ -284,6 +357,8 @@ class ContractSmokeEnv:
             "ego": ego,
             "target": target,
             "neighbors": self._neighbor_observation(),
+            "candidates": candidates,
+            "decision_mask": self.task_decision.float().unsqueeze(-1),
         }
 
     def _coverage(self) -> Tensor:
@@ -349,8 +424,45 @@ class ContractSmokeEnv:
             self.milestone_paid[crossed, milestone_id] = True
         return result
 
-    def step(self, normalized_action: Tensor):
-        action = normalized_action.clamp(-1.0, 1.0)
+    def step(self, hybrid_action: Tensor):
+        if hybrid_action.shape[-1] != 9:
+            raise ValueError(f"hybrid action must have 9 fields, got {hybrid_action.shape[-1]}")
+        action = hybrid_action[..., :4].clamp(-1.0, 1.0)
+        decision = self.task_decision.clone()
+        requested_index = hybrid_action[..., 4].round().long().clamp(0, self.max_candidates - 1)
+        requested_valid = torch.gather(
+            self.candidate_valid, -1, requested_index.unsqueeze(-1)
+        ).squeeze(-1)
+        fallback_index = self.candidate_valid.float().argmax(dim=-1)
+        selected_index = torch.where(requested_valid, requested_index, fallback_index)
+        gather_position = selected_index[..., None, None].expand(-1, -1, 1, 3)
+        selected_position = torch.gather(
+            self.candidate_positions, -2, gather_position
+        ).squeeze(-2)
+        selected_yaw = torch.gather(
+            self.candidate_yaws, -1, selected_index.unsqueeze(-1)
+        ).squeeze(-1)
+        selected_gain = torch.gather(
+            self.candidate_gains, -1, selected_index.unsqueeze(-1)
+        ).squeeze(-1) / float(self.candidate_cfg["visible_gain_normalizer"])
+        offset_scale = torch.tensor(
+            self.selection_cfg["max_position_offset_m"], device=self.device
+        )
+        body_offset = hybrid_action[..., 5:8].clamp(-1.0, 1.0) * offset_scale
+        world_offset_xy = self._world_xy(body_offset[..., :2])
+        world_offset = torch.cat((world_offset_xy, body_offset[..., 2:3]), dim=-1)
+        selected_position = selected_position + world_offset
+        half_xy = self.world_size[:2] * 0.5 - 0.5
+        selected_position[..., 0] = selected_position[..., 0].clamp(-half_xy[0], half_xy[0])
+        selected_position[..., 1] = selected_position[..., 1].clamp(-half_xy[1], half_xy[1])
+        selected_position[..., 2] = selected_position[..., 2].clamp(self.minimum_z, self.maximum_z)
+        selected_yaw = selected_yaw + hybrid_action[..., 8].clamp(-1.0, 1.0) * float(
+            self.selection_cfg["max_yaw_offset_rad"]
+        )
+        self.targets = torch.where(decision.unsqueeze(-1), selected_position, self.targets)
+        self.target_yaw = torch.where(decision, selected_yaw, self.target_yaw)
+        viewpoint_gain_prior = decision.float() * selected_gain
+        self.task_decision.zero_()
         old_distance = (self.targets - self.positions).norm(dim=-1)
         old_positions = self.positions.clone()
         old_coverage = self._coverage()
@@ -380,8 +492,7 @@ class ContractSmokeEnv:
 
         new_distance = (self.targets - self.positions).norm(dim=-1)
         goal_reached = new_distance <= 1.0
-        for env_id, agent_id in torch.nonzero(goal_reached, as_tuple=False).tolist():
-            self.targets[env_id, agent_id] = self._random_positions(1)[0]
+        self._generate_tasks(goal_reached)
 
         clearance = self._obstacle_clearance()
         nearest_drone = self._nearest_drone()
@@ -416,6 +527,7 @@ class ContractSmokeEnv:
             "collision": collision,
             "out_of_bounds": out_of_bounds,
             "coverage_milestone_reward": milestone,
+            "viewpoint_gain_prior": viewpoint_gain_prior,
         }
         reward, components = self.reward_composer(signals)
         self.previous_action = action
@@ -434,5 +546,6 @@ class ContractSmokeEnv:
             "coverage": finished_coverage,
             "collision": finished_collision,
             "goal_reached": goal_reached.float().sum(dim=-1),
+            "viewpoint_decisions": decision.float().sum(dim=-1),
         }
         return self._observation(), self._critic_state(), reward, done, info

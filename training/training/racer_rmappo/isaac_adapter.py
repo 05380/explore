@@ -19,7 +19,7 @@ class MultiUAVBackend(Protocol):
     def reset(self) -> Tuple[Dict[str, Tensor], Tensor]: ...
 
     def step(
-        self, normalized_action: Tensor
+        self, hybrid_action: Tensor
     ) -> Tuple[Dict[str, Tensor], Tensor, Tensor, Tensor, Dict[str, object]]: ...
 
 
@@ -28,7 +28,7 @@ def validate_backend_shapes(backend: MultiUAVBackend) -> None:
     expected = (backend.num_envs, backend.num_agents)
     if tuple(critic_state.shape[:2]) != expected:
         raise ValueError(f"critic state starts with {critic_state.shape[:2]}, expected {expected}")
-    required = {"depth", "ego", "target", "neighbors"}
+    required = {"depth", "ego", "target", "neighbors", "candidates", "decision_mask"}
     if set(observation) != required:
         raise ValueError(f"observation keys must be {sorted(required)}, got {sorted(observation)}")
     for key, value in observation.items():

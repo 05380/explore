@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 
 import torch
 from torch import Tensor, nn
-from torch.distributions import Normal
+from torch.distributions import Categorical, Normal
 
 
 def _orthogonal_init(module: nn.Module, gain: float = math.sqrt(2.0)) -> nn.Module:
@@ -49,6 +49,7 @@ class SharedRecurrentActor(nn.Module):
         ego_dim: int = 11,
         target_dim: int = 7,
         neighbor_dim: int = 8,
+        candidate_dim: int = 9,
         hidden_size: int = 256,
         action_dim: int = 4,
     ) -> None:
@@ -62,23 +63,33 @@ class SharedRecurrentActor(nn.Module):
         self.neighbor_encoder = nn.Sequential(
             nn.Linear(neighbor_dim, 64), nn.ELU(), nn.Linear(64, 64), nn.ELU()
         )
+        self.candidate_encoder = nn.Sequential(
+            nn.Linear(candidate_dim, 64), nn.ELU(), nn.Linear(64, 64), nn.ELU()
+        )
         self.fusion = nn.Sequential(
-            nn.Linear(128 + 96 + 64, hidden_size), nn.LayerNorm(hidden_size), nn.ELU()
+            nn.Linear(128 + 96 + 64 + 64, hidden_size), nn.LayerNorm(hidden_size), nn.ELU()
         )
         self.gru = nn.GRUCell(hidden_size, hidden_size)
         self.action_mean = nn.Linear(hidden_size, action_dim)
         self.log_std = nn.Parameter(torch.full((action_dim,), -0.5))
+        self.candidate_query = nn.Linear(hidden_size, 64)
+        self.candidate_key = nn.Linear(64, 64)
+        self.residual_mean = nn.Linear(hidden_size, 4)
+        self.residual_log_std = nn.Parameter(torch.full((4,), -1.0))
         self.apply(_orthogonal_init)
         nn.init.orthogonal_(self.action_mean.weight, 0.01)
+        nn.init.orthogonal_(self.candidate_query.weight, 0.01)
+        nn.init.orthogonal_(self.residual_mean.weight, 0.01)
 
     def initial_hidden(self, batch: int, agents: int, device: torch.device | str) -> Tensor:
         return torch.zeros(batch, agents, self.hidden_size, device=device)
 
-    def encode(self, observation: Dict[str, Tensor]) -> Tensor:
+    def _encode_components(self, observation: Dict[str, Tensor]) -> Tuple[Tensor, Tensor, Tensor]:
         depth = observation["depth"]
         ego = observation["ego"]
         target = observation["target"]
         neighbors = observation["neighbors"]
+        candidates = observation["candidates"]
         leading = depth.shape[:-3]
         depth_features = self.depth_encoder(depth.reshape(-1, *depth.shape[-3:])).reshape(*leading, -1)
         ego_target = self.ego_target_encoder(torch.cat((ego, target), dim=-1))
@@ -89,12 +100,42 @@ class SharedRecurrentActor(nn.Module):
         pooled = masked.max(dim=-2).values
         any_valid = valid.any(dim=-2)
         pooled = torch.where(any_valid, pooled, torch.zeros_like(pooled))
-        return self.fusion(torch.cat((depth_features, ego_target, pooled), dim=-1))
+
+        candidate_features = self.candidate_encoder(candidates)
+        candidate_valid = candidates[..., -1] > 0.5
+        # The ROS task contract guarantees at least one candidate.  Keep index
+        # zero usable as a defensive fallback for malformed simulator batches.
+        no_valid = ~candidate_valid.any(dim=-1)
+        fallback = torch.zeros_like(candidate_valid)
+        fallback[..., 0] = no_valid
+        candidate_valid = candidate_valid | fallback
+        candidate_masked = candidate_features.masked_fill(
+            ~candidate_valid.unsqueeze(-1), torch.finfo(candidate_features.dtype).min
+        )
+        candidate_pooled = candidate_masked.max(dim=-2).values
+        fused = self.fusion(
+            torch.cat((depth_features, ego_target, pooled, candidate_pooled), dim=-1)
+        )
+        return fused, candidate_features, candidate_valid
+
+    def encode(self, observation: Dict[str, Tensor]) -> Tensor:
+        return self._encode_components(observation)[0]
 
     def _distribution(self, feature: Tensor) -> Normal:
         mean = self.action_mean(feature)
         std = self.log_std.clamp(-5.0, 1.0).exp().expand_as(mean)
         return Normal(mean, std)
+
+    def _selection_distributions(
+        self, hidden: Tensor, candidate_features: Tensor, candidate_valid: Tensor
+    ) -> Tuple[Categorical, Normal]:
+        query = self.candidate_query(hidden).unsqueeze(-2)
+        keys = self.candidate_key(candidate_features)
+        logits = (query * keys).sum(dim=-1) / math.sqrt(keys.shape[-1])
+        logits = logits.masked_fill(~candidate_valid, -1e9)
+        residual_mean = self.residual_mean(hidden)
+        residual_std = self.residual_log_std.clamp(-5.0, 1.0).exp().expand_as(residual_mean)
+        return Categorical(logits=logits), Normal(residual_mean, residual_std)
 
     @staticmethod
     def _squashed_log_prob(distribution: Normal, raw_action: Tensor, action: Tensor) -> Tensor:
@@ -107,14 +148,34 @@ class SharedRecurrentActor(nn.Module):
         hidden: Tensor,
         deterministic: bool = False,
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-        feature = self.encode(observation)
+        feature, candidate_features, candidate_valid = self._encode_components(observation)
         next_hidden = self.gru(feature.reshape(-1, feature.shape[-1]), hidden.reshape(-1, self.hidden_size))
         next_hidden = next_hidden.reshape(*feature.shape[:-1], self.hidden_size)
         distribution = self._distribution(next_hidden)
-        raw_action = distribution.mean if deterministic else distribution.rsample()
-        action = torch.tanh(raw_action)
-        log_prob = self._squashed_log_prob(distribution, raw_action, action)
+        raw_navigation = distribution.mean if deterministic else distribution.rsample()
+        navigation = torch.tanh(raw_navigation)
+        log_prob = self._squashed_log_prob(distribution, raw_navigation, navigation)
         entropy = distribution.entropy().sum(dim=-1)
+
+        categorical, residual_distribution = self._selection_distributions(
+            next_hidden, candidate_features, candidate_valid
+        )
+        candidate_index = categorical.probs.argmax(dim=-1) if deterministic else categorical.sample()
+        raw_residual = (
+            residual_distribution.mean if deterministic else residual_distribution.rsample()
+        )
+        residual = torch.tanh(raw_residual)
+        decision = observation["decision_mask"].squeeze(-1).to(log_prob.dtype)
+        selection_log_prob = categorical.log_prob(candidate_index)
+        selection_log_prob += self._squashed_log_prob(
+            residual_distribution, raw_residual, residual
+        )
+        selection_entropy = categorical.entropy() + residual_distribution.entropy().sum(dim=-1)
+        log_prob = log_prob + decision * selection_log_prob
+        entropy = entropy + decision * selection_entropy
+        action = torch.cat(
+            (navigation, candidate_index.to(navigation.dtype).unsqueeze(-1), residual), dim=-1
+        )
         return action, log_prob, entropy, next_hidden
 
     def evaluate_actions(
@@ -123,14 +184,31 @@ class SharedRecurrentActor(nn.Module):
         hidden: Tensor,
         actions: Tensor,
     ) -> Tuple[Tensor, Tensor, Tensor]:
-        feature = self.encode(observation)
+        feature, candidate_features, candidate_valid = self._encode_components(observation)
         next_hidden = self.gru(feature.reshape(-1, feature.shape[-1]), hidden.reshape(-1, self.hidden_size))
         next_hidden = next_hidden.reshape(*feature.shape[:-1], self.hidden_size)
         distribution = self._distribution(next_hidden)
-        bounded = actions.clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+        bounded = actions[..., :4].clamp(-1.0 + 1e-6, 1.0 - 1e-6)
         raw_action = torch.atanh(bounded)
         log_prob = self._squashed_log_prob(distribution, raw_action, bounded)
         entropy = distribution.entropy().sum(dim=-1)
+        categorical, residual_distribution = self._selection_distributions(
+            next_hidden, candidate_features, candidate_valid
+        )
+        candidate_index = actions[..., 4].round().long().clamp(
+            0, candidate_valid.shape[-1] - 1
+        )
+        residual = actions[..., 5:9].clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+        raw_residual = torch.atanh(residual)
+        decision = observation["decision_mask"].squeeze(-1).to(log_prob.dtype)
+        selection_log_prob = categorical.log_prob(candidate_index)
+        selection_log_prob += self._squashed_log_prob(
+            residual_distribution, raw_residual, residual
+        )
+        log_prob = log_prob + decision * selection_log_prob
+        entropy = entropy + decision * (
+            categorical.entropy() + residual_distribution.entropy().sum(dim=-1)
+        )
         return log_prob, entropy, next_hidden
 
     def evaluate_sequence(

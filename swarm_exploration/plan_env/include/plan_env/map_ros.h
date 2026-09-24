@@ -85,6 +85,7 @@ private:
   double visualization_truncate_height_, visualization_truncate_low_;
   bool show_esdf_time_, show_occ_time_;
   bool show_all_map_;
+  bool enable_esdf_;
 
   // data
   // flags of map state

@@ -18,6 +18,7 @@
 // #include <lkh_mtsp_solver/lkh3_interface.h>
 
 #include <fstream>
+#include <cmath>
 
 using Eigen::Vector4d;
 
@@ -37,6 +38,10 @@ void FastExplorationFSM::init(ros::NodeHandle& nh) {
   nh.param("fsm/use_rl_navigation", fp_->use_rl_navigation_, false);
   nh.param("fsm/rl_target_replan_period", fp_->rl_target_replan_period_, 2.0);
   nh.param("fsm/rl_target_reached_dist", fp_->rl_target_reached_dist_, 1.0);
+  nh.param("fsm/rl_selection_timeout", fp_->rl_selection_timeout_, 2.0);
+  nh.param("fsm/rl_max_offset_xy", fp_->rl_max_offset_xy_, 1.0);
+  nh.param("fsm/rl_max_offset_z", fp_->rl_max_offset_z_, 0.5);
+  nh.param("fsm/rl_max_yaw_offset", fp_->rl_max_yaw_offset_, 0.35);
 
   /* Initialize main modules */
   expl_manager_.reset(new FastExplorationManager);
@@ -54,6 +59,10 @@ void FastExplorationFSM::init(ros::NodeHandle& nh) {
   fd_->go_back_ = false;
   fd_->rl_target_id_ = 0;
   fd_->rl_target_plan_time_ = ros::Time(0);
+  fd_->rl_task_publish_time_ = ros::Time(0);
+  fd_->rl_waiting_for_selection_ = false;
+  fd_->rl_have_selected_target_ = false;
+  fd_->rl_selected_candidate_ = -1;
 
   /* Ros sub, pub and timer */
   exec_timer_ = nh.createTimer(ros::Duration(0.01), &FastExplorationFSM::FSMCallback, this);
@@ -67,7 +76,11 @@ void FastExplorationFSM::init(ros::NodeHandle& nh) {
   replan_pub_ = nh.advertise<std_msgs::Empty>("/planning/replan", 10);
   new_pub_ = nh.advertise<std_msgs::Empty>("/planning/new", 10);
   bspline_pub_ = nh.advertise<bspline::Bspline>("/planning/bspline", 10);
+  rl_task_pub_ = nh.advertise<exploration_manager::RLTask>("/rl_navigation/task", 10, true);
   rl_target_pub_ = nh.advertise<exploration_manager::RLTarget>("/rl_navigation/target", 10, true);
+  rl_selection_sub_ = nh.subscribe("/rl_navigation/viewpoint_selection", 10,
+      &FastExplorationFSM::rlViewpointSelectionCallback, this,
+      ros::TransportHints().tcpNoDelay());
   rl_target_timer_ =
       nh.createTimer(ros::Duration(0.2), &FastExplorationFSM::rlTargetTimerCallback, this);
 
@@ -223,6 +236,22 @@ void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
       auto tn = ros::Time::now();
 
       if (fp_->use_rl_navigation_) {
+        if (fd_->rl_waiting_for_selection_) {
+          bool task_invalid = expl_manager_->ed_->reallocated_;
+          if (!fd_->go_back_ && expl_manager_->frontier_finder_->isFrontierCovered())
+            task_invalid = true;
+          if (task_invalid ||
+              (tn - fd_->rl_task_publish_time_).toSec() > fp_->rl_selection_timeout_) {
+            ROS_WARN("RACER RL task invalid or selection timed out; regenerating candidates");
+            transitState(PLAN_TRAJ, "FSM-RL-selection");
+          }
+          break;
+        }
+        if (!fd_->rl_have_selected_target_) {
+          ROS_ERROR_THROTTLE(1.0, "RL execution has neither a task wait nor an active target");
+          transitState(PLAN_TRAJ, "FSM-RL-invalid-state");
+          break;
+        }
         const double target_dist = (fd_->odom_pos_ - expl_manager_->ed_->next_pos_).norm();
         const double target_age = (tn - fd_->rl_target_plan_time_).toSec();
 
@@ -232,7 +261,8 @@ void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
           return;
         }
 
-        bool need_replan = target_dist < fp_->rl_target_reached_dist_ ||
+        const bool target_invalid = !isRLTargetValid(expl_manager_->ed_->next_pos_);
+        bool need_replan = target_dist < fp_->rl_target_reached_dist_ || target_invalid ||
             target_age > fp_->rl_target_replan_period_ || expl_manager_->ed_->reallocated_;
         if (!fd_->go_back_ && expl_manager_->frontier_finder_->isFrontierCovered())
           need_replan = true;
@@ -318,7 +348,14 @@ int FastExplorationFSM::callExplorationPlanner() {
 
   int res;
   if (fp_->use_rl_navigation_ && fd_->go_back_) {
-    // The home position has already been stored in next_pos_. PPO performs navigation.
+    // Return-to-home is still executed by PPO, but represented as a one-candidate task.
+    auto ed = expl_manager_->ed_;
+    ed->rl_task_grid_ids_.clear();
+    ed->rl_task_frontier_ids_.clear();
+    ed->rl_candidate_positions_ = { fd_->start_pos_ };
+    ed->rl_candidate_yaws_ = { 0.0 };
+    ed->rl_candidate_frontier_ids_ = { -1 };
+    ed->rl_candidate_visible_voxels_ = { 0 };
     res = SUCCEED;
     fd_->avoid_collision_ = false;
   } else if (fd_->avoid_collision_ || fd_->go_back_) {  // Only replan trajectory
@@ -333,9 +370,13 @@ int FastExplorationFSM::callExplorationPlanner() {
 
   if (res == SUCCEED) {
     if (fp_->use_rl_navigation_) {
-      fd_->rl_target_plan_time_ = ros::Time::now();
       ++fd_->rl_target_id_;
-      publishRLTarget();
+      fd_->rl_task_publish_time_ = ros::Time::now();
+      fd_->rl_waiting_for_selection_ = true;
+      fd_->rl_have_selected_target_ = false;
+      fd_->rl_selected_candidate_ = -1;
+      publishRLTarget(false);  // Explicitly cancel the previously latched target.
+      publishRLTask();
       return res;
     }
 
@@ -561,7 +602,10 @@ void FastExplorationFSM::visualize(int content) {
     // NonUniformBspline position_traj(ctrl_pt, 3, info->position_traj_.getKnotSpan());
 
     if (fp_->use_rl_navigation_) {
-      visualization_->drawSpheres({ ed_ptr->next_pos_ }, 0.35,
+      const vector<Vector3d> rl_points = fd_->rl_waiting_for_selection_
+          ? ed_ptr->rl_candidate_positions_
+          : vector<Vector3d>{ ed_ptr->next_pos_ };
+      visualization_->drawSpheres(rl_points, 0.35,
           PlanningVisualization::getColor(
               (expl_manager_->ep_->drone_id_ - 1) / double(expl_manager_->ep_->drone_num_)),
           "rl_target", 0, 6);
@@ -720,7 +764,32 @@ void FastExplorationFSM::odometryCallback(const nav_msgs::OdometryConstPtr& msg)
   }
 }
 
-void FastExplorationFSM::publishRLTarget() {
+void FastExplorationFSM::publishRLTask() {
+  if (!fp_->use_rl_navigation_ || fd_->rl_target_id_ == 0) return;
+
+  auto ed = expl_manager_->ed_;
+  exploration_manager::RLTask msg;
+  msg.header.stamp = ros::Time::now();
+  msg.header.frame_id = "world";
+  msg.task_id = fd_->rl_target_id_;
+  msg.drone_id = getId();
+  msg.grid_ids = ed->rl_task_grid_ids_;
+  msg.frontier_ids = ed->rl_task_frontier_ids_;
+  msg.candidate_yaws = ed->rl_candidate_yaws_;
+  msg.candidate_frontier_ids = ed->rl_candidate_frontier_ids_;
+  msg.candidate_visible_voxels = ed->rl_candidate_visible_voxels_;
+  msg.return_home = fd_->go_back_;
+  for (const auto& candidate : ed->rl_candidate_positions_) {
+    geometry_msgs::Point point;
+    point.x = candidate.x();
+    point.y = candidate.y();
+    point.z = candidate.z();
+    msg.candidate_positions.push_back(point);
+  }
+  rl_task_pub_.publish(msg);
+}
+
+void FastExplorationFSM::publishRLTarget(bool active) {
   if (!fp_->use_rl_navigation_ || fd_->rl_target_id_ == 0) return;
 
   exploration_manager::RLTarget msg;
@@ -728,22 +797,95 @@ void FastExplorationFSM::publishRLTarget() {
   msg.header.frame_id = "world";
   msg.target_id = fd_->rl_target_id_;
   msg.drone_id = getId();
-  msg.position.x = expl_manager_->ed_->next_pos_[0];
-  msg.position.y = expl_manager_->ed_->next_pos_[1];
-  msg.position.z = expl_manager_->ed_->next_pos_[2];
-  msg.yaw = expl_manager_->ed_->next_yaw_;
+  const Vector3d position = active ? expl_manager_->ed_->next_pos_ : fd_->odom_pos_;
+  msg.position.x = position[0];
+  msg.position.y = position[1];
+  msg.position.z = position[2];
+  msg.yaw = active ? expl_manager_->ed_->next_yaw_ : fd_->odom_yaw_;
   msg.return_home = fd_->go_back_;
-  for (auto id : expl_manager_->ed_->swarm_state_[getId() - 1].grid_ids_)
-    msg.grid_ids.push_back(id);
+  msg.grid_ids = expl_manager_->ed_->rl_task_grid_ids_;
+  msg.active = active;
   rl_target_pub_.publish(msg);
 }
 
 void FastExplorationFSM::rlTargetTimerCallback(const ros::TimerEvent& e) {
-  if (state_ == EXEC_TRAJ) publishRLTarget();
+  if (state_ != EXEC_TRAJ) return;
+  if (fd_->rl_waiting_for_selection_)
+    publishRLTask();
+  else if (fd_->rl_have_selected_target_)
+    publishRLTarget(true);
+}
+
+bool FastExplorationFSM::isRLTargetValid(const Vector3d& target) const {
+  auto map = expl_manager_->sdf_map_;
+  auto ed = expl_manager_->ed_;
+  const bool in_allocated_task = ed->rl_task_frontier_ids_.empty() ||
+      expl_manager_->hgrid_->isInAllocatedGrids(target, ed->rl_task_grid_ids_);
+  return target.allFinite() && in_allocated_task && map->isInMap(target) &&
+      map->isInBox(target) && map->getOccupancy(target) == SDFMap::FREE &&
+      map->getInflateOccupancy(target) == 0;
+}
+
+void FastExplorationFSM::rlViewpointSelectionCallback(
+    const exploration_manager::RLViewpointSelectionConstPtr& msg) {
+  if (!fp_->use_rl_navigation_ || state_ != EXEC_TRAJ || !fd_->rl_waiting_for_selection_) return;
+  if (msg->drone_id != getId() || msg->task_id != fd_->rl_target_id_) {
+    ROS_WARN_THROTTLE(1.0, "Ignoring stale or foreign PPO viewpoint selection");
+    return;
+  }
+
+  auto ed = expl_manager_->ed_;
+  if (msg->candidate_index < 0 ||
+      msg->candidate_index >= int(ed->rl_candidate_positions_.size())) {
+    ROS_ERROR("Rejected PPO viewpoint: candidate index %d is outside [0, %zu)",
+        msg->candidate_index, ed->rl_candidate_positions_.size());
+    return;
+  }
+  const auto& offset = msg->position_offset;
+  if (!std::isfinite(offset.x) || !std::isfinite(offset.y) || !std::isfinite(offset.z) ||
+      !std::isfinite(msg->yaw_offset) || std::fabs(offset.x) > fp_->rl_max_offset_xy_ ||
+      std::fabs(offset.y) > fp_->rl_max_offset_xy_ ||
+      std::fabs(offset.z) > fp_->rl_max_offset_z_ ||
+      std::fabs(msg->yaw_offset) > fp_->rl_max_yaw_offset_) {
+    ROS_ERROR("Rejected PPO viewpoint: residual is non-finite or exceeds the safety bound");
+    return;
+  }
+
+  const int index = msg->candidate_index;
+  const double c = std::cos(fd_->odom_yaw_);
+  const double s = std::sin(fd_->odom_yaw_);
+  const Vector3d world_offset(
+      c * offset.x - s * offset.y, s * offset.x + c * offset.y, offset.z);
+  Vector3d target = ed->rl_candidate_positions_[index] +
+      world_offset;
+  if (!isRLTargetValid(target)) {
+    ROS_ERROR_STREAM("Rejected PPO viewpoint outside its task or in unknown/occupied/inflated/out-of-map voxel: "
+                     << target.transpose());
+    return;
+  }
+
+  double target_yaw = ed->rl_candidate_yaws_[index] + msg->yaw_offset;
+  target_yaw = std::atan2(std::sin(target_yaw), std::cos(target_yaw));
+  ed->next_pos_ = target;
+  ed->next_yaw_ = target_yaw;
+  fd_->rl_selected_candidate_ = index;
+  fd_->rl_waiting_for_selection_ = false;
+  fd_->rl_have_selected_target_ = true;
+  fd_->rl_target_plan_time_ = ros::Time::now();
+  publishRLTarget(true);
+  ROS_INFO("Accepted PPO viewpoint candidate %d for task %u", index, fd_->rl_target_id_);
 }
 
 void FastExplorationFSM::transitState(EXPL_STATE new_state, string pos_call) {
   int pre_s = int(state_);
+  if (fp_->use_rl_navigation_ && state_ == EXEC_TRAJ && new_state != EXEC_TRAJ) {
+    // Do not leave a latched active target behind while RACER is replanning,
+    // idle or finished.  The velocity policy must hover until the next task is
+    // selected and a new active target is published.
+    if (fd_->rl_have_selected_target_) publishRLTarget(false);
+    fd_->rl_have_selected_target_ = false;
+    fd_->rl_waiting_for_selection_ = false;
+  }
   state_ = new_state;
   ROS_INFO_STREAM("[" + pos_call + "]: Drone "
                   << getId()

@@ -3,6 +3,7 @@
 #include <thread>
 #include <iostream>
 #include <fstream>
+#include <numeric>
 #include <active_perception/graph_node.h>
 #include <active_perception/graph_search.h>
 #include <active_perception/perception_utils.h>
@@ -63,6 +64,8 @@ void FastExplorationManager::initialize(ros::NodeHandle& nh) {
   nh.param("exploration/drone_num", ep_->drone_num_, 1);
   nh.param("exploration/drone_id", ep_->drone_id_, 1);
   nh.param("exploration/init_plan_num", ep_->init_plan_num_, 2);
+  nh.param("exploration/rl_candidate_num", ep_->rl_candidate_num_, 16);
+  ep_->rl_candidate_num_ = std::max(1, ep_->rl_candidate_num_);
 
   ed_->swarm_state_.resize(ep_->drone_num_);
   ed_->pair_opt_stamps_.resize(ep_->drone_num_);
@@ -159,7 +162,86 @@ int FastExplorationManager::planExploreMotion(
     next_pos = ed_->points_[min_cost_id];
     next_yaw = ed_->yaws_[min_cost_id];
 
-  } else if (frontier_ids.size() == 0) {
+  }
+
+  // In RL mode RACER stops at a fixed-size, safety-filtered candidate set.
+  // It still owns frontier extraction, HGrid partitioning and decentralized
+  // allocation, but it no longer applies the local-tour heuristic to choose
+  // the final viewpoint.  PPO will make that decision through RLTask.
+  if (!plan_trajectory) {
+    ed_->rl_task_grid_ids_ = grid_ids;
+    ed_->rl_task_frontier_ids_ = frontier_ids;
+    ed_->rl_candidate_positions_.clear();
+    ed_->rl_candidate_yaws_.clear();
+    ed_->rl_candidate_frontier_ids_.clear();
+    ed_->rl_candidate_visible_voxels_.clear();
+
+    if (!frontier_ids.empty()) {
+      vector<int> candidate_frontiers;
+      const int frontier_num =
+          std::min(int(frontier_ids.size()), std::max(1, ep_->refined_num_));
+      candidate_frontiers.assign(frontier_ids.begin(), frontier_ids.begin() + frontier_num);
+      vector<vector<Vector3d>> candidate_points;
+      vector<vector<double>> candidate_yaws;
+      frontier_finder_->getViewpointsInfo(pos, candidate_frontiers, ep_->top_view_num_,
+          ep_->max_decay_, candidate_points, candidate_yaws);
+
+      // Round-robin keeps later frontiers represented instead of filling the
+      // whole action mask with candidates from the first frontier.
+      for (int rank = 0;
+           ed_->rl_candidate_positions_.size() < size_t(ep_->rl_candidate_num_); ++rank) {
+        bool added = false;
+        for (int i = 0; i < candidate_points.size() &&
+                        ed_->rl_candidate_positions_.size() < size_t(ep_->rl_candidate_num_);
+             ++i) {
+          if (rank >= candidate_points[i].size()) continue;
+          const auto& point = candidate_points[i][rank];
+          const double candidate_yaw = candidate_yaws[i][rank];
+          ed_->rl_candidate_positions_.push_back(point);
+          ed_->rl_candidate_yaws_.push_back(candidate_yaw);
+          ed_->rl_candidate_frontier_ids_.push_back(candidate_frontiers[i]);
+          ed_->rl_candidate_visible_voxels_.push_back(
+              frontier_finder_->computeGainOfView(point, candidate_yaw));
+          added = true;
+        }
+        if (!added) break;
+      }
+    } else {
+      // Rare transition case: an assigned grid currently contains no frontier.
+      // Offer nearby RACER top views instead of silently choosing one for PPO.
+      vector<int> order(ed_->points_.size());
+      std::iota(order.begin(), order.end(), 0);
+      const Vector3d reference = ed_->grid_tour_.size() > 1 ? ed_->grid_tour_[1] : pos;
+      std::sort(order.begin(), order.end(), [&](int a, int b) {
+        return (ed_->averages_[a] - reference).squaredNorm() <
+               (ed_->averages_[b] - reference).squaredNorm();
+      });
+      for (auto id : order) {
+        if (ed_->rl_candidate_positions_.size() >= size_t(ep_->rl_candidate_num_)) break;
+        ed_->rl_candidate_positions_.push_back(ed_->points_[id]);
+        ed_->rl_candidate_yaws_.push_back(ed_->yaws_[id]);
+        ed_->rl_candidate_frontier_ids_.push_back(id);
+        ed_->rl_candidate_visible_voxels_.push_back(
+            frontier_finder_->computeGainOfView(ed_->points_[id], ed_->yaws_[id]));
+      }
+    }
+
+    if (ed_->rl_candidate_positions_.empty()) {
+      ROS_ERROR("RACER produced no valid viewpoint candidate for the RL task");
+      return FAIL;
+    }
+    ed_->refined_points_ = ed_->rl_candidate_positions_;
+    ed_->refined_views_.clear();
+    for (int i = 0; i < ed_->rl_candidate_positions_.size(); ++i) {
+      ed_->refined_views_.push_back(ed_->rl_candidate_positions_[i] +
+          2.0 * Vector3d(cos(ed_->rl_candidate_yaws_[i]), sin(ed_->rl_candidate_yaws_[i]), 0));
+    }
+    ROS_INFO("RACER RL task: %zu grids, %zu frontiers, %zu viewpoint candidates",
+        grid_ids.size(), frontier_ids.size(), ed_->rl_candidate_positions_.size());
+    return SUCCEED;
+  }
+
+  if (frontier_ids.size() == 0) {
     // // The assigned grid contains no frontier, find the one closest to the grid
     // ROS_WARN("No frontier in grid");
 
@@ -285,10 +367,6 @@ int FastExplorationManager::planExploreMotion(
   std::cout << "Next view: " << next_pos.transpose() << ", " << next_yaw << std::endl;
   ed_->next_pos_ = next_pos;
   ed_->next_yaw_ = next_yaw;
-
-  // RL navigation consumes the RACER-selected viewpoint directly. The legacy
-  // A*/kinodynamic/B-spline pipeline remains available when plan_trajectory is true.
-  if (!plan_trajectory) return SUCCEED;
 
   if (planTrajToView(pos, vel, acc, yaw, next_pos, next_yaw) == FAIL) {
     return FAIL;

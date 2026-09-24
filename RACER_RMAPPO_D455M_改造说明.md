@@ -6,39 +6,46 @@
 
 ```text
 D455M 深度图
-    -> 每机 0.5 m 占据/ESDF 地图
+    -> 每机 0.5 m 占据地图 + 0.5 m 障碍膨胀层
     -> 在线 map chunks 交换与融合
-    -> RACER frontier/HGrid 分区和两两协商
-    -> 每机 RLTarget 局部子目标
-    -> 共享 RMAPPO actor（分散执行）
+    -> RACER frontier/HGrid 分区、两两协商、候选观测点生成
+    -> 每机 RLTask（最多 16 个候选观测点）
+    -> 共享 RMAPPO 选择候选点/小残差，并连续控制避障
+    -> 经安全校验得到 RLTarget
     -> 机体系速度动作
     -> PositionCommand / 飞控
 ```
 
-RACER 继续负责：未知空间转 frontier、层次栅格任务分区、全局/局部视点选择、无人机间两两协商。PPO 不重新学习任务分配，只学习从当前深度观测到 RACER 子目标之间的避障与局部导航。
+RACER 继续负责：未知空间转 frontier、层次栅格任务分区、无人机间两两协商以及安全候选观测点生成。PPO 不重新学习任务分配，但负责在本机已分配任务内选择具体候选观测点（可附加很小的 xyz/yaw 残差），并学习到达该点的避障与局部导航。
 
-地图融合应在探索过程中持续进行，而不是等所有无人机结束后再做。在线融合后，各机能尽快利用队友的新观测更新 frontier 和任务分配；结束阶段只需要做完整度、冲突和覆盖率检查。代码中的 map chunks 已改为在线定时发送、接收后立即写入本机地图并触发膨胀和 ESDF 更新。
+地图融合应在探索过程中持续进行，而不是等所有无人机结束后再做。在线融合后，各机能尽快利用队友的新观测更新 frontier 和任务分配；结束阶段只需要做完整度、冲突和覆盖率检查。代码中的 map chunks 已改为在线定时发送、接收后立即写入本机地图并更新障碍膨胀层。RL 专用 launch 关闭 ESDF 的周期计算；原 RACER launch 仍默认开启 ESDF，以保持兼容。
+
+这里关闭的是 `updateESDF3d()` 的定时计算，不是删除 `SDFMap` 类型及其距离缓冲区；后者与原项目大量接口耦合，直接移除风险很高。RACER 的 frontier、HGrid、候选可见性和目标合法性仍必须保留占据概率、unknown/free 分类与膨胀占据层，它们不属于 PPO 低层轨迹规划器。
 
 ## 2. 本次已经实现的代码
 
-### 2.1 RACER 只输出子目标的 RL 模式
+### 2.1 RACER 输出任务和候选点，PPO 完成最终选择
 
 新增参数 `fsm/use_rl_navigation`，默认 `false`，因此原有 RACER A*/kinodynamic/B-spline 行为保持不变。
 
 打开该参数时：
 
 - RACER 仍运行 frontier、HGrid、TSP 和两两协商；
-- `planExploreMotion()` 计算 `next_pos`、`next_yaw` 后不再生成低层轨迹；
-- FSM 发布 `exploration_manager/RLTarget`；
+- `planExploreMotion()` 不再用局部 tour 启发式决定唯一 `next_pos`，而是从已分配 frontier 中按轮询方式保留最多 16 个候选点；
+- FSM 发布 `exploration_manager/RLTask`，包含 task/grid/frontier ID、候选世界坐标、yaw、所属 frontier 和估计可见体素数；
+- PPO 通过 `RLViewpointSelection` 返回候选索引以及有界残差；
+- FSM 将 xy 残差从选择时机体系旋转到 world 系，再检查 task/drone ID、候选索引、残差、所属分配网格、地图边界、已知自由状态和膨胀占据状态，通过后才发布激活的 `RLTarget`；
 - RL 模式不发布 B-spline，也不调用原轨迹碰撞检查；
-- FSM 使用真实里程计判断到达子目标，并按 2 s 默认周期重新评估 frontier/分区；
+- FSM 使用真实里程计判断到达子目标；选择响应超时为 2 s，已选目标执行超时为 20 s，到达、目标失效、任务重分配或执行超时才重选；
 - DroneState 始终广播真实里程计状态，而不是预测的 B-spline 状态。
 
-`RLTarget.msg` 包含：目标序号、无人机编号、世界系目标位置、目标 yaw、当前分配的 grid IDs，以及是否为返航目标。目标以 latched topic 发布并以 5 Hz 重发，策略晚启动时也能拿到目标。
+新任务产生时先发布 `RLTarget.active=false`，明确取消旧目标；选择通过后发布同一 task ID 的 `active=true` 目标。任务和目标均为 latched topic，并以 5 Hz 重发。
 
 每架无人机的目标 topic：
 
 ```text
+/rl_navigation/task_<drone_id>
+/rl_navigation/viewpoint_selection_<drone_id>
 /rl_navigation/target_<drone_id>
 ```
 
@@ -59,7 +66,7 @@ linear.z  垂向速度
 angular.z yaw 角速度
 ```
 
-范围应为 `[-1, 1]`。默认物理上限为前进 2.0 m/s、后退 0.5 m/s、横向 0.8 m/s、垂向 0.5 m/s、yaw 1.0 rad/s，并对三维平移速度做 2.0 m/s 模长硬限幅。桥接节点只做坐标变换、限幅、飞行边界限制和 0.3 s 命令超时悬停，不查询地图，也不替策略规划避障路径。
+范围应为 `[-1, 1]`。默认物理上限为前进 2.0 m/s、后退 0.5 m/s、横向 0.8 m/s、垂向 0.5 m/s、yaw 1.0 rad/s，并对三维平移速度做 2.0 m/s 模长硬限幅。桥接节点只做目标激活门控、坐标变换、限幅、飞行边界限制和 0.3 s 命令超时悬停；`RLTarget.active=false` 时即使 actor 仍误发旧速度也会悬停。它不查询地图，也不替策略规划避障路径。
 
 输出：
 
@@ -103,7 +110,7 @@ uav_simulator/local_sensing/params/camera_d455m_640x360.yaml
 - 新体素以及 FREE/OCCUPIED 分类发生变化的体素都会进入后续 chunk；
 - 接收端只处理 `to_drone_id` 指向自己的消息；
 - 检查无人机编号、chunk 编号和地址/占据数组长度；
-- 远端 chunk 写入后更新障碍膨胀与 ESDF；
+- 远端 chunk 写入后更新障碍膨胀；仅当 `map_ros/enable_esdf=true` 时继续更新 ESDF；
 - `ChunkStamps` 携带发送机位置，可按通信半径过滤；
 - 新配置默认使用 UDPROS，chunk 大小约 1 KB，降低 IP 分片风险；
 - map 数量与“最后一个编号是否是地面站”解耦，16 号机不再被错误当成地面站。
@@ -129,7 +136,15 @@ roslaunch exploration_manager swarm_exploration_rl_d455m_16.launch
 
 然后用 RViz 的 2D Nav Goal 或向 `/move_base_simple/goal` 发布任意 PoseStamped 触发探索。该 goal 只充当启动信号，不是最终探索目标。
 
-重要：新增 launch 不包含 PPO actor。actor 未启动时，动作桥接会因超时持续发悬停命令，所以无人机不会自己探索。这是预期的安全行为。
+重要：新增 launch 不包含 PPO actor。actor 未启动时，RACER 会因 2 s 选择超时重复生成任务，动作桥接会因超时持续发悬停命令，所以无人机不会自己探索。这是预期的安全行为。
+
+不加载模型时，可先验证任务握手：
+
+```bash
+python3 $(rospack find exploration_manager)/scripts/rl_task_test_selector.py _drone_id:=1
+```
+
+该脚本只选择估计可见体素数最大的候选点，不发布飞行速度，不能当作策略使用。
 
 16 机 launch 是 ROS topic、分配与融合的集成测试入口，不是高保真训练器。`poscmd_2_odom` 是轻量运动学模拟，不能验证碰撞动力学、深度噪声或 sim-to-real。正式训练应由 Isaac Sim 发布每机深度、相机位姿和里程计，并订阅每机动作。
 
@@ -149,7 +164,7 @@ swarm_exploration/exploration_manager/config/rmappo_d455m_16.yaml
 
 - 连续 3 帧 64×40 inverse-depth；
 - 机体系速度、roll/pitch、`sin(yaw)`/`cos(yaw)`；
-- RACER 子目标在机体系下的相对位置和目标 yaw；
+- RACER 候选点集合、候选 mask、相对位置、yaw、visible gain，以及已选目标；
 - 上一时刻动作；
 - 最近 5 架邻机的相对位置、相对速度、消息年龄和 valid mask。
 
@@ -158,7 +173,7 @@ swarm_exploration/exploration_manager/config/rmappo_d455m_16.yaml
 ### 4.2 再使用共享 RMAPPO
 
 - 16 架无人机共享一个 actor 参数；
-- 执行时每机只使用本机深度、本机状态、自己的 RACER target 和通信范围内邻机状态；
+- 执行时每机只使用本机深度、本机状态、自己的 RACER task/target 和通信范围内邻机状态；
 - 训练时 centralized critic 可以看到所有无人机状态、任务分配摘要和全局覆盖率；
 - actor 使用 GRU/LSTM，应对有限视锥、遮挡、通信丢包和部分可观测性；
 - 训练中随机打乱 agent ID，防止策略把固定编号当成角色。
@@ -180,10 +195,11 @@ swarm_exploration/exploration_manager/config/rmappo_d455m_16.yaml
 配置文件给出了第一版权重。计算时应分项记录，不要只记录总 reward：
 
 ```text
-r = 目标距离进展
+r = 已选目标距离进展
+  + 小权重候选 visible-gain 先验
   + 本机新观测体素
   + 团队唯一新观测体素
-  + 到达 RACER 子目标
+  + 到达 PPO 所选局部目标
   - 碰撞/越界
   - 近障碍风险
   - 机间距离风险
@@ -237,6 +253,11 @@ UDP 丢包是正常事件。当前协议依靠周期 stamp 和缺块查询最终
 ## 6. 本次修改的文件
 
 - `swarm_exploration/exploration_manager/msg/RLTarget.msg`
+- `swarm_exploration/exploration_manager/msg/RLTask.msg`
+- `swarm_exploration/exploration_manager/msg/RLViewpointSelection.msg`
+- `swarm_exploration/exploration_manager/scripts/rl_task_test_selector.py`
+- `swarm_exploration/active_perception/include/active_perception/hgrid.h`
+- `swarm_exploration/active_perception/src/hgrid.cpp`
 - `swarm_exploration/exploration_manager/src/fast_exploration_fsm.cpp`
 - `swarm_exploration/exploration_manager/src/fast_exploration_manager.cpp`
 - `swarm_exploration/exploration_manager/src/rl_velocity_bridge.cpp`
@@ -278,13 +299,66 @@ UDP 丢包是正常事件。当前协议依靠周期 stamp 和缺块查询最终
 - 体素 0.5 m，障碍膨胀 0.5 m；深度建图每 4 像素抽样一次；
 - HGrid 10 m，通信半径 30 m，chunk 200 体素，尾块 0.25 s 刷新，默认 UDPROS；
 - 控制 20 Hz，动作超时 0.30 s，平移合速度硬上限 2.0 m/s；前向 2.0、后向 0.5、横向 0.8、垂向 0.5 m/s，yaw 1.0 rad/s；
-- RACER target 默认每 2 s 可重规划，1 m 内视为到达；
+- 每个 RACER task 最多 16 个候选点；选择响应超时 2 s，已选目标执行超时 20 s，1 m 内视为到达；位置残差限幅为 xy 各 1.0 m、z 0.5 m，yaw 0.35 rad；
 - RMAPPO rollout 256，递归序列 32，PPO epoch 5，minibatch 8，`gamma=0.99`，`GAE=0.95`，clip 0.2，学习率 3e-4，GRU hidden 256；
 - 新体素奖励分别按本机/团队唯一体素计数，但单步各封顶 1.0，重复观测惩罚单步最多 0.25；
 - 近障碍奖励距离从低速 1.0 m 随速度按反应距离和制动距离增大，在 2 m/s 时封顶 3.5 m。
 
-`training/training/racer_rmappo` 现在可以运行无 Isaac 依赖的合同冒烟训练，用于发现维度、递归状态、PPO 更新和奖励数值错误。它不是飞行动力学训练环境。高保真 Isaac backend、真实 D455 深度渲染、楼房/树木碰撞体以及 ROS actor 推理节点仍需在 Ubuntu + NVIDIA 训练机上继续接入。不要把 smoke checkpoint 部署到无人机。
+`training/training/racer_rmappo` 现在的共享 actor 输出 9 维混合动作：4 维连续速度、1 个离散候选索引、4 维有界 xyz/yaw 残差。候选选择的 log-prob/entropy 只在 `decision_mask=1` 的新任务事件参与 PPO loss；低层速度仍以 20 Hz 更新。合同冒烟环境可用于发现候选 mask、维度、递归状态、PPO 更新和奖励数值错误，但它不是飞行动力学训练环境。高保真 Isaac backend、真实 D455 深度渲染、楼房/树木碰撞体以及 ROS actor 推理节点仍需在 Ubuntu + NVIDIA 训练机上继续接入。不要把 smoke checkpoint 部署到无人机。
 
 地图融合发生在探索过程中。结束时只需停止新任务、等待 chunk 缺块补齐和 stamp 收敛，然后保存 union map；如果各机 world/VIO 坐标未对齐，则必须先做坐标对齐，不能靠 chunk 合并消除重影。
 
 训练、诊断、评估和导出命令以及逐项排错方法见 `training/README_RMAPPO.md`。
+
+## 9. 改造后可能出现的问题与测试方法
+
+| 风险 | 典型表现 | 如何确认 | 通过标准 |
+|---|---|---|---|
+| 消息未重新生成或 topic 接错 | 收不到 `RLTask`，或 target 永远 inactive | 清理旧 build/devel 后编译；`rostopic echo /rl_navigation/task_1`，再运行测试 selector | 同一 task ID 依次出现 task、selection、active target |
+| 候选维度/掩码错误 | PPO 选到 padding，Categorical 出 NaN | 单测检查 `[env,agent,16,9]`；记录每批 valid 数和 logits | 每个 task 至少 1 个 valid；无 NaN/Inf；invalid 概率为 0 |
+| 选择频率错误 | 每个 20 Hz step 都换目标、策略抖动 | 统计 `RLTask.task_id` 与控制 step；记录 `decision_mask` | 只在新任务、到达、失效、重分配、20 s 超时触发 |
+| 残差导致非法目标 | FSM 持续打印 `Rejected PPO viewpoint` | 分别注入越界索引、超限残差、unknown/occupied 目标 | 非法选择不激活 target，合法零残差立即激活 |
+| 关闭 ESDF 后误伤 RACER | frontier/HGrid 无结果或访问陈旧距离场 | `enable_esdf=false` 单机跑 frontier；对照 `true` 的 grid/frontier 数 | RL 模式持续产生任务；旧模式开启 ESDF 后行为不变 |
+| 膨胀层或坐标系错 | 候选在墙内、融合地图重影 | RViz 同时显示 raw/inflated occupancy、候选点；检查 16 机地图参数 | 候选均 known-free 且 inflate=0；共享静态物体重合 |
+| 20 m 深度造成 CPU/伪自由 | 回调积压、远处噪声清空障碍 | 记录深度回调周期、队列延迟、有效像素距离直方图 | 无效深度不变成 20 m 命中；控制与建图无持续积压 |
+| UDP chunk 丢失/乱序 | 各机 coverage 长期不一致 | 注入 5/10/20% 丢包和 0–250 ms 延迟，断链后恢复 | 恢复后缺块补齐，chunk interval 和占据计数收敛 |
+| 奖励投机 | 原地转圈刷体素、贴墙、重复扫 | 分项画 reward、团队唯一体素、重复体素、碰撞率 | 覆盖率增长伴随新区域访问，碰撞率与重复率不过阈值 |
+| sim-to-real 输入漂移 | 仿真成功、真机静止或撞障碍 | 保存同场景预处理 tensor，逐元素比较训练/部署；检查坐标轴与单位 | inverse-depth、无效值、帧栈和 body/world 变换一致 |
+| 16 机规模瓶颈 | ROS 队列堆积、任务过期、CPU/RSS 暴涨 | 按 1→2→4→8→16 机记录 callback latency、FPS、带宽、RSS | 99% 控制延迟低于 50 ms，选择低于 2 s，无持续丢队列 |
+| 终止条件过早 | 通信分区后误判探索完成 | 暂时隔离两组无人机，再恢复通信 | frontier 空、chunk stamp 收敛、未知可达体素阈值同时满足才结束 |
+
+建议严格按“消息接口 → 单机固定障碍 → 单机随机障碍 → 2/4 机通信 → 8/16 机规模 → 真机低速”的顺序验收。每一层未通过时不要用后续大场景掩盖问题。
+
+## 10. 建议执行的测试命令
+
+在 Ubuntu ROS 工作站上先重新生成消息并构建：
+
+```bash
+cd /path/to/catkin_ws
+catkin_make --pkg plan_env active_perception exploration_manager
+source devel/setup.bash
+```
+
+单机启动后检查参数与握手：
+
+```bash
+roslaunch exploration_manager single_drone_rl_d455m.xml drone_num:=1 simulation:=true
+rosparam get /exploration_node_1/map_ros/enable_esdf
+rostopic echo /rl_navigation/task_1
+rosrun exploration_manager rl_task_test_selector.py _drone_id:=1
+rostopic echo /rl_navigation/target_1
+```
+
+预期 `enable_esdf=false`；触发探索后 task 含 1–16 个等长候选字段；selector 返回选择后，同一 ID 的 target 从 `active:false` 变为 `active:true`。用 `_candidate_index:=999` 重启 selector 可验证越界选择被拒绝且无人机保持悬停。
+
+训练端在装有 PyTorch/PyYAML 的环境运行：
+
+```bash
+cd /path/to/RACER-main/training
+pytest -q training/tests/test_racer_rmappo.py
+python training/scripts/train_rmappo.py \
+  --backend smoke --device cpu --stage single_agent_sparse_static \
+  --num-envs 2 --total-steps 4096 --output /tmp/racer_rmappo_smoke
+```
+
+smoke 只验收张量、混合动作、事件 mask、奖励和 PPO 更新，不验收真实避障。真正进入 Isaac Sim 前，必须实现 `MultiUAVBackend` 并让同一套测试在深度相机、碰撞体、动力学和通信扰动下通过。

@@ -437,6 +437,19 @@ GridInfo& HGrid::getGrid(const int& id) {
     return grid2_->grid_data_[id - grid_num1];
 }
 
+bool HGrid::isInAllocatedGrids(
+    const Eigen::Vector3d& pos, const vector<int>& grid_ids, double margin) {
+  for (auto id : grid_ids) {
+    auto& grid = getGrid(id);
+    // HGrid partitions the horizontal plane; vmin_/vmax_ intentionally do
+    // not encode a vertical volume.
+    if (pos.x() >= grid.vmin_.x() - margin && pos.x() <= grid.vmax_.x() + margin &&
+        pos.y() >= grid.vmin_.y() - margin && pos.y() <= grid.vmax_.y() + margin)
+      return true;
+  }
+  return false;
+}
+
 void HGrid::getActiveGrids(vector<int>& grid_ids) {
   grid_ids.clear();
   const int grid_num1 = grid1_->grid_data_.size();

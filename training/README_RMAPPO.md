@@ -10,7 +10,8 @@
 - `[并行编队, agent, ...]` 张量合同；`num_parallel_swarms` 与无人机数量严格分离；
 - 共享 D455M 深度 actor（3 帧 64×40 inverse-depth）和 GRU；
 - 训练期集中式、对 agent 排列等变的 critic；
-- tanh Gaussian 四维动作 `[vx, vy, vz, yaw_rate]`；
+- 混合动作：tanh Gaussian 四维速度 `[vx, vy, vz, yaw_rate]`、Categorical 候选索引、tanh Gaussian 四维 xyz/yaw 小残差；
+- `RLTask` 候选编码与 valid mask；候选选择只在 `decision_mask=1` 的任务事件计入 PPO log-prob/entropy，速度仍为 20 Hz；
 - 递归序列 minibatch、GAE、PPO clip、value clip、梯度裁剪和 checkpoint；
 - 目标进展、新体素、团队唯一体素、重复观测、近障碍、机间距、动作变化、停滞、碰撞和越界的分项奖励；
 - 新体素奖励单步封顶，防止一帧深度生成的大量体素压倒碰撞惩罚；
@@ -19,7 +20,9 @@
 `smoke` 环境只验证训练代码、维度、速度限幅、奖励与循环能否工作。它用圆柱近似障碍且没有真实飞行动力学，产出的权重不得用于真机，也不代表避障训练完成。
 
 尚未完成的是高保真 `isaac` backend。旧 `env.py` 是单机 4 m LiDAR 任务，代码会在选择 `--backend isaac` 时明确报错，防止误训。Isaac backend 必须按
-`training/training/racer_rmappo/isaac_adapter.py` 返回深度、ego、RACER target、邻机状态和 centralized critic state。
+`training/training/racer_rmappo/isaac_adapter.py` 返回深度、ego、已选 target、RACER candidates、decision mask、邻机状态和 centralized critic state。
+
+目前 `isaac` backend 和 ROS 在线推理节点仍未实现，因此现在只能做训练链路 smoke 验证，不能开始有效的避障训练，更不能直接部署。
 
 ## 环境诊断
 
@@ -49,6 +52,8 @@ python training/scripts/eval_rmappo.py \
 
 确认 loss、KL、entropy 都为有限值，reward 会变化，并且测试通过后，才开始实现/运行 Isaac backend。
 
+还应确认首步 `decision_mask=1`、普通控制步为 0、到达目标后只脉冲一次；`candidates` 为 `[E,A,16,9]`，padding 的 valid=0 且从不被采样。
+
 ## 课程顺序
 
 配置真源为 `swarm_exploration/exploration_manager/config/rmappo_d455m_16.yaml`。建议逐阶段训练并使用前一阶段 checkpoint 初始化：
@@ -57,6 +62,8 @@ python training/scripts/eval_rmappo.py \
 2. `four_agent_dense_static`：4 机，60×60×5 m；
 3. `eight_agent_comm_randomization`：8 机，100×100×5 m；
 4. `sixteen_agent_full`：16 机，150×150×5 m。
+
+每个规模内部再分三段更稳定：先固定候选 0 只训练低层避障；再冻结低层或降低其学习率，打开候选选择；最后两者联合微调。当前统一 trainer 已支持混合动作和事件 mask，但“冻结/分组学习率”尚未做成命令行选项，接 Isaac backend 时应补上。
 
 示例命令（只有 Isaac backend 实现后才可用）：
 
@@ -82,6 +89,8 @@ python training/scripts/export_rmappo_actor.py \
 
 导出时同时生成 `.json` 元数据。ROS 推理节点必须严格复用相同的 inverse-depth、resize、frame stack、字段顺序和动作缩放；任何一项不一致都会造成 sim-to-real 输入漂移。
 
+导出的动作字段顺序为：`[vx, vy, vz, yaw_rate, candidate_index, dx_body, dy_body, dz, dyaw]`。仅当收到新的 `RLTask` 时发布 `RLViewpointSelection`；速度四维每个控制周期发布。残差是归一化值，部署端按 `[1.0,1.0,0.5] m` 和 `0.35 rad` 缩放；xy 残差按选择时的机体系解释，ROS FSM 再旋转到 world 系。
+
 ## 地图融合
 
 地图在探索过程中通过 map chunks 增量融合，不需要结束后再执行一个独立的“融合任务”。结束时需要：
@@ -96,6 +105,7 @@ python training/scripts/export_rmappo_actor.py \
 ## 调试重点
 
 - 首先检查 observation 每个字段的 `shape/min/max/nan`，尤其 inverse-depth 的无效值必须为 0；
+- 单独记录每个 task 的 valid candidate 数、候选选择熵、选中 visible gain、残差饱和比例和 FSM 拒绝次数；如果残差长期贴着 ±1，优先检查候选质量，不要继续放宽安全边界；
 - 检查训练动作经缩放后平移速度模长不超过 2 m/s，ROS bridge 也会再次硬限幅；
 - 分项画 reward 曲线。新体素项长期顶到 cap，说明计数或权重过大；近障碍项总为 0，说明距离查询或坐标系有错；
 - 近障安全距离会随速度增大：`1.0 + v*0.30 + v^2/(2*1.0)`，最大 3.5 m。若仿真实测最大减速度或端到端延迟更差，应先改这两个参数；
