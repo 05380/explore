@@ -11,13 +11,17 @@ pytest.importorskip("yaml")
 TRAINING_PACKAGE = Path(__file__).resolve().parents[1]
 if str(TRAINING_PACKAGE) not in sys.path:
     sys.path.insert(0, str(TRAINING_PACKAGE))
+SCRIPTS_PACKAGE = TRAINING_PACKAGE / "scripts"
+if str(SCRIPTS_PACKAGE) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_PACKAGE))
 
 from racer_rmappo.config import apply_curriculum_stage, load_config
-from racer_rmappo.isaac_adapter import validate_backend_shapes
+from racer_rmappo.isaac_adapter import validate_backend_shapes, validate_step_info
 from racer_rmappo.model import CentralizedCritic, SharedRecurrentActor
 from racer_rmappo.reward import RewardComposer
 from racer_rmappo.smoke_env import ContractSmokeEnv
 from racer_rmappo.storage import generalized_advantage_estimate
+from check_ros_training_config import check_contract
 
 
 def small_config():
@@ -34,9 +38,12 @@ def test_contract_parameters_are_synchronized():
     assert cfg["world"]["voxel_resolution_m"] == 0.5
     assert cfg["world"]["obstacle_inflation_m"] == 0.5
     assert cfg["camera"]["max_depth_m"] == 20.0
+    assert cfg["camera"]["fixed_to_body"] is True
     assert cfg["action"]["physical_limits"]["speed_norm_mps"] == 2.0
     assert cfg["actor_observation"]["racer_candidates"]["max_candidates"] == 16
+    assert cfg["actor_observation"]["racer_candidates"]["visible_gain_normalizer"] == 20000.0
     assert cfg["action"]["viewpoint_selection"]["max_position_offset_m"] == [1.0, 1.0, 0.5]
+    assert check_contract(cfg)["valid"] is True
 
 
 def test_actor_critic_shapes():
@@ -80,10 +87,80 @@ def test_smoke_backend_action_speed_and_shapes():
     action = torch.zeros(env.num_envs, env.num_agents, 9)
     action[..., :4] = 1.0
     _, _, reward, done, info = env.step(action)
+    validate_step_info(info, env.num_envs)
     assert env.velocities.norm(dim=-1).max() <= 2.0 + 1e-5
     assert reward.shape == (2, 4)
     assert done.shape == (2,)
     assert set(info["reward_components"]) >= {"collision", "near_obstacle", "target_progress"}
+
+
+def test_body_fixed_camera_frustum_updates_seen_voxels():
+    cfg = apply_curriculum_stage(load_config(), "single_agent_sparse_static")
+    cfg["training"]["num_parallel_swarms"] = 1
+    cfg["training"]["smoke_max_obstacles"] = 1
+    cfg["world"]["voxel_resolution_m"] = 1.0
+    env = ContractSmokeEnv(cfg, "cpu")
+    env.positions[0, 0] = torch.tensor([0.0, 0.0, 1.5])
+    env.yaw[0, 0] = 0.0
+    env.obstacle_position[0, 0] = torch.tensor([5.0, 0.0])
+    env.obstacle_radius[0, 0] = 1.0
+    env.obstacle_height[0, 0] = 3.0
+
+    forward_depth = env._render_inverse_depth()
+    forward_voxels = env._visible_voxel_indices(forward_depth)[0][0]
+    assert forward_depth.sum() > 0.0
+    assert forward_voxels.numel() > 1
+    env._update_seen(forward_depth)
+    coverage_after_forward = env._coverage().item()
+    assert coverage_after_forward > 0.0
+
+    env.yaw[0, 0] = torch.pi
+    backward_depth = env._render_inverse_depth()
+    backward_voxels = env._visible_voxel_indices(backward_depth)[0][0]
+    assert backward_depth.sum() == 0.0
+    assert backward_voxels.numel() == 0
+
+
+def test_viewpoint_requires_position_and_body_yaw():
+    cfg = apply_curriculum_stage(load_config(), "single_agent_sparse_static")
+    cfg["training"]["num_parallel_swarms"] = 1
+    cfg["training"]["smoke_max_obstacles"] = 1
+    cfg["training"]["coverage_success_threshold"] = 1.0
+    env = ContractSmokeEnv(cfg, "cpu")
+    env.task_decision.zero_()
+    env.targets.copy_(env.positions)
+    env.target_yaw.copy_(env.yaw + torch.pi)
+    env.obstacle_position[0, 0] = torch.tensor([10.0, 10.0])
+    env.obstacle_radius[0, 0] = 0.5
+    env.obstacle_height[0, 0] = 2.0
+    action = torch.zeros(1, 1, 9)
+
+    observation, _, _, _, info = env.step(action)
+    assert info["navigation_reached"].item() == 1.0
+    assert info["goal_reached"].item() == 0.0
+    assert observation["decision_mask"].item() == 0.0
+
+    env.yaw.copy_(env.target_yaw)
+    observation, _, _, _, info = env.step(action)
+    assert info["goal_reached"].item() == 1.0
+    assert observation["decision_mask"].item() == 1.0
+
+
+def test_episode_metrics_separate_collision_causes():
+    cfg = apply_curriculum_stage(load_config(), "single_agent_sparse_static")
+    cfg["training"]["num_parallel_swarms"] = 1
+    cfg["training"]["smoke_max_obstacles"] = 1
+    env = ContractSmokeEnv(cfg, "cpu")
+    env.obstacle_position[0, 0] = env.positions[0, 0, :2]
+    env.obstacle_radius[0, 0] = 1.0
+    env.obstacle_height[0, 0] = 3.0
+    action = torch.zeros(1, 1, 9)
+    _, _, _, done, info = env.step(action)
+    assert done.item() is True
+    assert info["episode_finished"].item() == 1.0
+    assert info["episode_collision"].item() == 1.0
+    assert info["episode_obstacle_collision"].item() == 1.0
+    assert info["episode_inter_drone_collision"].item() == 0.0
 
 
 def test_voxel_reward_is_capped():

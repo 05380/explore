@@ -45,6 +45,11 @@ class ContractSmokeEnv:
         self.drone_radius = 0.30
         self.stall_steps = max(1, int(float(cfg["reward"]["stall"]["window_seconds"]) * self.control_hz))
         self.terminate_on_collision = bool(cfg["training"].get("terminate_team_on_agent_collision", True))
+        self.goal_distance_m = float(cfg["training"].get("smoke_goal_distance_m", 1.0))
+        self.goal_yaw_rad = float(cfg["training"].get("smoke_goal_yaw_rad", 0.25))
+        self.coverage_success_threshold = float(
+            cfg["training"].get("coverage_success_threshold", 0.98)
+        )
 
         grid = torch.ceil(self.world_size / self.resolution).to(torch.long)
         self.grid_shape = tuple(int(value) for value in grid.tolist())
@@ -86,6 +91,11 @@ class ContractSmokeEnv:
         self.milestone_paid = torch.zeros(
             self.num_envs, len(cfg["reward"]["team_coverage_milestones"]), dtype=torch.bool, device=self.device
         )
+        self.episode_obstacle_collision = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.episode_inter_drone_collision = torch.zeros_like(self.episode_obstacle_collision)
+        self.episode_out_of_bounds = torch.zeros_like(self.episode_obstacle_collision)
+        self.episode_stall = torch.zeros_like(self.episode_obstacle_collision)
+        self.episode_safety_takeover = torch.zeros_like(self.episode_obstacle_collision)
         self.reset()
 
     def _random_positions(self, count: int) -> Tensor:
@@ -117,6 +127,11 @@ class ContractSmokeEnv:
         self.team_seen[env_ids] = False
         self.depth_stack[env_ids] = 0.0
         self.milestone_paid[env_ids] = False
+        self.episode_obstacle_collision[env_ids] = False
+        self.episode_inter_drone_collision[env_ids] = False
+        self.episode_out_of_bounds[env_ids] = False
+        self.episode_stall[env_ids] = False
+        self.episode_safety_takeover[env_ids] = False
 
         for env_id in env_ids.tolist():
             self.obstacle_position[env_id] = (
@@ -156,8 +171,12 @@ class ContractSmokeEnv:
                 points[0] = self.positions[env_id, agent_id]
                 valid[0] = True
             yaws = (torch.rand(self.max_candidates, device=self.device) * 2.0 - 1.0) * math.pi
-            # Synthetic visible counts stand in for RLTask.candidate_visible_voxels.
-            gains = 10.0 + torch.rand(self.max_candidates, device=self.device) * 90.0
+            # Synthetic candidate priors retain the same normalized range as
+            # occlusion-aware RLTask.candidate_visible_voxels.
+            gain_scale = float(self.candidate_cfg["visible_gain_normalizer"])
+            gains = gain_scale * (
+                0.05 + torch.rand(self.max_candidates, device=self.device) * 0.45
+            )
             gains *= valid.float()
             self.candidate_positions[env_id, agent_id] = points
             self.candidate_yaws[env_id, agent_id] = yaws
@@ -260,8 +279,9 @@ class ContractSmokeEnv:
                     )
         return result
 
-    def _update_depth_stack(self) -> None:
-        newest = self._render_inverse_depth()
+    def _update_depth_stack(self, newest: Tensor | None = None) -> None:
+        if newest is None:
+            newest = self._render_inverse_depth()
         self.depth_stack = torch.cat((self.depth_stack[:, :, 1:], newest), dim=2)
 
     def _neighbor_observation(self) -> Tensor:
@@ -346,7 +366,8 @@ class ContractSmokeEnv:
                 candidate_distance / float(self.candidate_cfg["distance_normalizer_m"]),
                 torch.sin(yaw_error).unsqueeze(-1),
                 torch.cos(yaw_error).unsqueeze(-1),
-                (self.candidate_gains / float(self.candidate_cfg["visible_gain_normalizer"])).unsqueeze(-1),
+                (self.candidate_gains / float(self.candidate_cfg["visible_gain_normalizer"]))
+                .clamp(0.0, 1.0).unsqueeze(-1),
                 rank,
                 self.candidate_valid.float().unsqueeze(-1),
             ),
@@ -383,33 +404,120 @@ class ContractSmokeEnv:
             dim=-1,
         )
 
-    def _voxel_indices(self) -> Tensor:
-        shifted = self.positions + self.world_size * torch.tensor(
-            [0.5, 0.5, 0.0], device=self.device
-        )
-        index = torch.floor(shifted / self.resolution).to(torch.long)
-        index[..., 0].clamp_(0, self.grid_shape[0] - 1)
-        index[..., 1].clamp_(0, self.grid_shape[1] - 1)
-        index[..., 2].clamp_(0, self.grid_shape[2] - 1)
-        return index[..., 0] + self.grid_shape[0] * (
-            index[..., 1] + self.grid_shape[1] * index[..., 2]
-        )
+    def _visible_voxel_indices(self, inverse_depth: Tensor) -> list[list[Tensor]]:
+        """Raycast valid depth returns from the rigid body-mounted camera.
 
-    def _update_seen(self) -> Tuple[Tensor, Tensor, Tensor]:
-        indices = self._voxel_indices()
+        Zero/no-return pixels do not clear space, matching the ROS mapper.  A
+        valid return marks every traversed voxel up to the measured surface.
+        """
+        horizontal_half = math.radians(float(self.camera["horizontal_fov_deg"]) * 0.5)
+        vertical_half = math.radians(float(self.camera["vertical_fov_deg"]) * 0.5)
+        azimuth = torch.linspace(
+            -horizontal_half, horizontal_half, self.depth_width, device=self.device
+        )
+        elevation = torch.linspace(
+            vertical_half, -vertical_half, self.depth_height, device=self.device
+        )
+        elev_grid = elevation[:, None].expand(self.depth_height, self.depth_width)
+        az_grid = azimuth[None, :].expand(self.depth_height, self.depth_width)
+        ray_body = torch.stack(
+            (
+                torch.cos(elev_grid) * torch.cos(az_grid),
+                torch.cos(elev_grid) * torch.sin(az_grid),
+                torch.sin(elev_grid),
+            ),
+            dim=-1,
+        ).reshape(-1, 3)
+        sample_distance = torch.arange(
+            self.resolution * 0.5,
+            float(self.camera["max_depth_m"]) + self.resolution * 0.5,
+            self.resolution,
+            device=self.device,
+        )
+        inv_minimum = 1.0 / float(self.camera["min_depth_m"])
+        inv_maximum = 1.0 / float(self.camera["max_depth_m"])
+        half_xy = self.world_size[:2] * 0.5
+        result: list[list[Tensor]] = []
+
+        for env_id in range(self.num_envs):
+            env_result: list[Tensor] = []
+            for agent_id in range(self.num_agents):
+                normalized = inverse_depth[env_id, agent_id, 0].reshape(-1)
+                valid = normalized > 0.0
+                if not bool(valid.any()):
+                    env_result.append(torch.empty(0, dtype=torch.long, device=self.device))
+                    continue
+                measured = 1.0 / (
+                    normalized[valid] * (inv_minimum - inv_maximum) + inv_maximum
+                )
+                rays = ray_body[valid]
+                yaw = self.yaw[env_id, agent_id]
+                cosine, sine = torch.cos(yaw), torch.sin(yaw)
+                world_rays = rays.clone()
+                world_rays[:, 0] = cosine * rays[:, 0] - sine * rays[:, 1]
+                world_rays[:, 1] = sine * rays[:, 0] + cosine * rays[:, 1]
+                points = self.positions[env_id, agent_id].view(1, 1, 3) + (
+                    world_rays[:, None, :] * sample_distance[None, :, None]
+                )
+                valid_sample = sample_distance[None, :] <= measured[:, None]
+                points = points[valid_sample]
+                in_world = (
+                    (points[:, 0] >= -half_xy[0])
+                    & (points[:, 0] < half_xy[0])
+                    & (points[:, 1] >= -half_xy[1])
+                    & (points[:, 1] < half_xy[1])
+                    & (points[:, 2] >= 0.0)
+                    & (points[:, 2] < self.world_size[2])
+                )
+                points = points[in_world]
+                if points.numel() == 0:
+                    env_result.append(torch.empty(0, dtype=torch.long, device=self.device))
+                    continue
+                shifted = points + self.world_size * torch.tensor(
+                    [0.5, 0.5, 0.0], device=self.device
+                )
+                index = torch.floor(shifted / self.resolution).to(torch.long)
+                linear = index[:, 0] + self.grid_shape[0] * (
+                    index[:, 1] + self.grid_shape[1] * index[:, 2]
+                )
+                env_result.append(torch.unique(linear))
+            result.append(env_result)
+        return result
+
+    def _update_seen(self, inverse_depth: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        observations = self._visible_voxel_indices(inverse_depth)
         local_new = torch.zeros(self.num_envs, self.num_agents, device=self.device)
         team_new = torch.zeros_like(local_new)
         duplicate = torch.zeros_like(local_new)
         for env_id in range(self.num_envs):
+            raw_team_credit = torch.zeros(self.num_agents, device=self.device)
+            nonempty = [indices for indices in observations[env_id] if indices.numel() > 0]
+            if nonempty:
+                union = torch.unique(torch.cat(nonempty))
+                globally_new = union[~self.team_seen[env_id, union]]
+            else:
+                union = torch.empty(0, dtype=torch.long, device=self.device)
+                globally_new = union
             for agent_id in range(self.num_agents):
-                voxel = int(indices[env_id, agent_id])
-                was_local = bool(self.local_seen[env_id, agent_id, voxel])
-                was_team = bool(self.team_seen[env_id, voxel])
-                local_new[env_id, agent_id] = float(not was_local)
-                team_new[env_id, agent_id] = float(not was_team)
-                duplicate[env_id, agent_id] = float(was_team)
-                self.local_seen[env_id, agent_id, voxel] = True
-                self.team_seen[env_id, voxel] = True
+                indices = observations[env_id][agent_id]
+                if indices.numel() == 0:
+                    continue
+                local_new[env_id, agent_id] = (~self.local_seen[env_id, agent_id, indices]).sum()
+                raw_team_credit[agent_id] = (~self.team_seen[env_id, indices]).sum()
+                self.local_seen[env_id, agent_id, indices] = True
+            # Allocate simultaneous discoveries without favoring lower agent IDs,
+            # while conserving the team's number of unique newly seen voxels.
+            credit_total = raw_team_credit.sum()
+            if credit_total > 0:
+                team_new[env_id] = raw_team_credit * (globally_new.numel() / credit_total)
+            for agent_id in range(self.num_agents):
+                duplicate[env_id, agent_id] = max(
+                    float(observations[env_id][agent_id].numel()) -
+                    float(team_new[env_id, agent_id]),
+                    0.0,
+                )
+            if union.numel() > 0:
+                self.team_seen[env_id, union] = True
         return local_new, team_new, duplicate
 
     def _coverage_milestone_reward(self, old_coverage: Tensor, new_coverage: Tensor) -> Tensor:
@@ -427,9 +535,11 @@ class ContractSmokeEnv:
     def step(self, hybrid_action: Tensor):
         if hybrid_action.shape[-1] != 9:
             raise ValueError(f"hybrid action must have 9 fields, got {hybrid_action.shape[-1]}")
-        action = hybrid_action[..., :4].clamp(-1.0, 1.0)
+        raw_action = hybrid_action[..., :4]
+        action = raw_action.clamp(-1.0, 1.0)
         decision = self.task_decision.clone()
-        requested_index = hybrid_action[..., 4].round().long().clamp(0, self.max_candidates - 1)
+        raw_requested_index = hybrid_action[..., 4].round().long()
+        requested_index = raw_requested_index.clamp(0, self.max_candidates - 1)
         requested_valid = torch.gather(
             self.candidate_valid, -1, requested_index.unsqueeze(-1)
         ).squeeze(-1)
@@ -445,6 +555,7 @@ class ContractSmokeEnv:
         selected_gain = torch.gather(
             self.candidate_gains, -1, selected_index.unsqueeze(-1)
         ).squeeze(-1) / float(self.candidate_cfg["visible_gain_normalizer"])
+        selected_gain = selected_gain.clamp(0.0, 1.0)
         offset_scale = torch.tensor(
             self.selection_cfg["max_position_offset_m"], device=self.device
         )
@@ -452,12 +563,21 @@ class ContractSmokeEnv:
         world_offset_xy = self._world_xy(body_offset[..., :2])
         world_offset = torch.cat((world_offset_xy, body_offset[..., 2:3]), dim=-1)
         selected_position = selected_position + world_offset
+        unclipped_selected_position = selected_position.clone()
         half_xy = self.world_size[:2] * 0.5 - 0.5
         selected_position[..., 0] = selected_position[..., 0].clamp(-half_xy[0], half_xy[0])
         selected_position[..., 1] = selected_position[..., 1].clamp(-half_xy[1], half_xy[1])
         selected_position[..., 2] = selected_position[..., 2].clamp(self.minimum_z, self.maximum_z)
         selected_yaw = selected_yaw + hybrid_action[..., 8].clamp(-1.0, 1.0) * float(
             self.selection_cfg["max_yaw_offset_rad"]
+        )
+        safety_takeover = (raw_action.abs() > 1.0).any(dim=-1)
+        safety_takeover |= decision & (
+            (raw_requested_index < 0)
+            | (raw_requested_index >= self.max_candidates)
+            | (~requested_valid)
+            | (hybrid_action[..., 5:9].abs() > 1.0).any(dim=-1)
+            | ((selected_position - unclipped_selected_position).abs() > 1e-6).any(dim=-1)
         )
         self.targets = torch.where(decision.unsqueeze(-1), selected_position, self.targets)
         self.target_yaw = torch.where(decision, selected_yaw, self.target_yaw)
@@ -487,16 +607,16 @@ class ContractSmokeEnv:
         self.velocities[..., :2] = self._world_xy(body_velocity[..., :2])
         self.velocities[..., 2] = body_velocity[..., 2]
         self.yaw += action[..., 3] * float(self.action_limits["yaw_rate_rps"]) * self.dt
+        self.yaw = torch.atan2(torch.sin(self.yaw), torch.cos(self.yaw))
         self.positions += self.velocities * self.dt
         self.step_count += 1
 
         new_distance = (self.targets - self.positions).norm(dim=-1)
-        goal_reached = new_distance <= 1.0
-        self._generate_tasks(goal_reached)
-
         clearance = self._obstacle_clearance()
         nearest_drone = self._nearest_drone()
-        collision = (clearance <= self.drone_radius) | (nearest_drone <= 2.0 * self.drone_radius)
+        obstacle_collision = clearance <= self.drone_radius
+        inter_drone_collision = nearest_drone <= 2.0 * self.drone_radius
+        collision = obstacle_collision | inter_drone_collision
         half_xy = self.world_size[:2] * 0.5
         out_of_bounds = (
             (self.positions[..., 0].abs() > half_xy[0])
@@ -509,8 +629,19 @@ class ContractSmokeEnv:
         self.stall_count = torch.where(stalled_now, self.stall_count + 1, torch.zeros_like(self.stall_count))
         stall = self.stall_count >= self.stall_steps
 
-        local_new, team_new, duplicate = self._update_seen()
+        # The camera has no independent joint: this frame uses the vehicle yaw
+        # updated above.  Observation completion requires xyz, yaw and this
+        # newly fused frame, not position alone.
+        newest_depth = self._render_inverse_depth()
+        local_new, team_new, duplicate = self._update_seen(newest_depth)
         new_coverage = self._coverage()
+        yaw_error = torch.atan2(
+            torch.sin(self.target_yaw - self.yaw), torch.cos(self.target_yaw - self.yaw)
+        ).abs()
+        navigation_reached = new_distance <= self.goal_distance_m
+        heading_reached = yaw_error <= self.goal_yaw_rad
+        goal_reached = navigation_reached & heading_reached
+        self._generate_tasks(goal_reached)
         milestone = self._coverage_milestone_reward(old_coverage, new_coverage)
         signals = {
             "target_progress_m": old_distance - new_distance,
@@ -531,21 +662,72 @@ class ContractSmokeEnv:
         }
         reward, components = self.reward_composer(signals)
         self.previous_action = action
+        obstacle_collision_team = obstacle_collision.any(dim=-1)
+        inter_drone_collision_team = inter_drone_collision.any(dim=-1)
+        out_of_bounds_team = out_of_bounds.any(dim=-1)
+        stall_team = stall.any(dim=-1)
+        safety_takeover_team = safety_takeover.any(dim=-1)
+        self.episode_obstacle_collision |= obstacle_collision_team
+        self.episode_inter_drone_collision |= inter_drone_collision_team
+        self.episode_out_of_bounds |= out_of_bounds_team
+        self.episode_stall |= stall_team
+        self.episode_safety_takeover |= safety_takeover_team
         team_failure = (collision | out_of_bounds).any(dim=-1) if self.terminate_on_collision else torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
         timeout = self.step_count >= self.max_steps
-        done = team_failure | timeout
+        coverage_success = new_coverage >= self.coverage_success_threshold
+        done = team_failure | timeout | coverage_success
+        episode_success = coverage_success & (~self.episode_obstacle_collision) & (
+            ~self.episode_inter_drone_collision
+        ) & (~self.episode_out_of_bounds)
 
         finished_coverage = new_coverage.clone()
         finished_collision = collision.any(dim=-1).float()
-        self._reset_envs(torch.nonzero(done, as_tuple=False).flatten())
-        self._update_depth_stack()
+        episode_finished = done.clone()
+        episode_obstacle_collision = (done & self.episode_obstacle_collision).float()
+        episode_inter_drone_collision = (done & self.episode_inter_drone_collision).float()
+        episode_collision = (
+            done & (self.episode_obstacle_collision | self.episode_inter_drone_collision)
+        ).float()
+        episode_out_of_bounds = (done & self.episode_out_of_bounds).float()
+        episode_stall = (done & self.episode_stall).float()
+        episode_safety_takeover = (done & self.episode_safety_takeover).float()
+        episode_timeout = (done & timeout & (~coverage_success)).float()
+        episode_success = (done & episode_success).float()
+        coverage_target_steps = torch.where(
+            done & coverage_success, self.step_count, torch.zeros_like(self.step_count)
+        ).float()
+
+        done_ids = torch.nonzero(done, as_tuple=False).flatten()
+        self._reset_envs(done_ids)
+        if done_ids.numel() > 0:
+            reset_depth = self._render_inverse_depth()
+            newest_depth = newest_depth.clone()
+            newest_depth[done_ids] = reset_depth[done_ids]
+        self._update_depth_stack(newest_depth)
         info = {
             "reward_components": components,
             "coverage": finished_coverage,
             "collision": finished_collision,
+            "obstacle_collision": obstacle_collision_team.float(),
+            "inter_drone_collision": inter_drone_collision_team.float(),
+            "out_of_bounds": out_of_bounds_team.float(),
+            "stall": stall_team.float(),
+            "safety_takeover": safety_takeover_team.float(),
             "goal_reached": goal_reached.float().sum(dim=-1),
+            "navigation_reached": navigation_reached.float().sum(dim=-1),
             "viewpoint_decisions": decision.float().sum(dim=-1),
+            "episode_finished": episode_finished.float(),
+            "episode_success": episode_success,
+            "episode_collision": episode_collision,
+            "episode_obstacle_collision": episode_obstacle_collision,
+            "episode_inter_drone_collision": episode_inter_drone_collision,
+            "episode_timeout": episode_timeout,
+            "episode_stall": episode_stall,
+            "episode_out_of_bounds": episode_out_of_bounds,
+            "episode_safety_takeover": episode_safety_takeover,
+            "coverage_target_reached": (done & coverage_success).float(),
+            "coverage_target_steps": coverage_target_steps,
         }
         return self._observation(), self._critic_state(), reward, done, info

@@ -43,8 +43,8 @@ def validate_config(cfg: Mapping[str, Any]) -> None:
         raise ValueError(f"missing configuration sections: {missing}")
 
     experiment = cfg["experiment"]
-    if int(experiment["num_agents"]) < 1:
-        raise ValueError("experiment.num_agents must be >= 1")
+    if not 1 <= int(experiment["num_agents"]) <= 16:
+        raise ValueError("experiment.num_agents must be in [1, 16]")
     _positive(experiment, "control_hz")
 
     world = cfg["world"]
@@ -55,20 +55,31 @@ def validate_config(cfg: Mapping[str, Any]) -> None:
     _positive(world, "obstacle_inflation_m")
 
     camera = cfg["camera"]
+    if not bool(camera.get("fixed_to_body", False)):
+        raise ValueError("the current deployment contract requires camera.fixed_to_body=true")
+    _positive(camera, "observation_tilt_tolerance_rad")
     if float(camera["min_depth_m"]) >= float(camera["max_depth_m"]):
         raise ValueError("camera.min_depth_m must be smaller than max_depth_m")
     if list(cfg["actor_observation"]["depth"]["resize"]) != [64, 40]:
         raise ValueError("deployment contract currently requires depth.resize=[64, 40]")
+    normalize_range = [
+        float(value) for value in cfg["actor_observation"]["depth"]["normalize_range_m"]
+    ]
+    if normalize_range != [float(camera["min_depth_m"]), float(camera["max_depth_m"])]:
+        raise ValueError("depth.normalize_range_m must match camera min/max depth")
     candidates = cfg["actor_observation"]["racer_candidates"]
     if int(candidates["max_candidates"]) < 1:
         raise ValueError("racer_candidates.max_candidates must be >= 1")
     if int(candidates["feature_dim"]) != 9:
         raise ValueError("deployment contract currently requires racer_candidates.feature_dim=9")
+    _positive(candidates, "visible_gain_normalizer")
 
     selection = cfg["action"]["viewpoint_selection"]
     offsets = selection["max_position_offset_m"]
     if len(offsets) != 3 or any(float(v) <= 0.0 for v in offsets):
         raise ValueError("viewpoint_selection.max_position_offset_m must contain three positive values")
+    if float(offsets[0]) != float(offsets[1]):
+        raise ValueError("ROS uses one rl_max_offset_xy value, so x/y limits must match")
     _positive(selection, "max_yaw_offset_rad")
 
     limits = cfg["action"]["physical_limits"]
@@ -76,6 +87,10 @@ def validate_config(cfg: Mapping[str, Any]) -> None:
         _positive(limits, key)
     if float(limits["forward_mps"]) > float(limits["speed_norm_mps"]):
         raise ValueError("forward_mps cannot exceed speed_norm_mps")
+
+    success_threshold = float(cfg["training"].get("coverage_success_threshold", 0.98))
+    if not 0.0 < success_threshold <= 1.0:
+        raise ValueError("training.coverage_success_threshold must be in (0, 1]")
 
     ppo = cfg["ppo"]
     if int(ppo["rollout_steps"]) < int(ppo["recurrent_sequence_length"]):

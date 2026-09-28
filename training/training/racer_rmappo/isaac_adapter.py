@@ -12,6 +12,32 @@ from typing import Dict, Protocol, Tuple
 from torch import Tensor
 
 
+REQUIRED_STEP_INFO = {
+    "reward_components",
+    "coverage",
+    "collision",
+    "obstacle_collision",
+    "inter_drone_collision",
+    "out_of_bounds",
+    "stall",
+    "safety_takeover",
+    "goal_reached",
+    "navigation_reached",
+    "viewpoint_decisions",
+    "episode_finished",
+    "episode_success",
+    "episode_collision",
+    "episode_obstacle_collision",
+    "episode_inter_drone_collision",
+    "episode_timeout",
+    "episode_stall",
+    "episode_out_of_bounds",
+    "episode_safety_takeover",
+    "coverage_target_reached",
+    "coverage_target_steps",
+}
+
+
 class MultiUAVBackend(Protocol):
     num_envs: int
     num_agents: int
@@ -34,3 +60,14 @@ def validate_backend_shapes(backend: MultiUAVBackend) -> None:
     for key, value in observation.items():
         if tuple(value.shape[:2]) != expected:
             raise ValueError(f"{key} starts with {value.shape[:2]}, expected {expected}")
+
+
+def validate_step_info(info: Dict[str, object], num_envs: int) -> None:
+    missing = REQUIRED_STEP_INFO - set(info)
+    if missing:
+        raise ValueError(f"backend step info is missing metrics: {sorted(missing)}")
+    for key in REQUIRED_STEP_INFO - {"reward_components"}:
+        value = info[key]
+        if not isinstance(value, Tensor) or tuple(value.shape) != (num_envs,):
+            shape = getattr(value, "shape", None)
+            raise ValueError(f"step info {key} must have shape ({num_envs},), got {shape}")

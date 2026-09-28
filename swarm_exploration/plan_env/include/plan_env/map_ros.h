@@ -16,6 +16,7 @@
 
 #include <memory>
 #include <random>
+#include <cstdint>
 
 using std::shared_ptr;
 using std::normal_distribution;
@@ -104,6 +105,11 @@ private:
   default_random_engine eng_;
 
   ros::Time map_start_time_;
+  // Monotonically counts sensor frames after their point cloud has been fused.
+  // The exploration FSM uses this to distinguish merely reaching a viewpoint
+  // from actually observing it with the body-fixed camera.
+  uint64_t sensor_update_count_;
+  ros::Time last_sensor_update_time_;
 
   friend SDFMap;
   friend MultiMapManager;

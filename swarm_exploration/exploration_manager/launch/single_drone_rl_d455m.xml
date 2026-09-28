@@ -69,6 +69,8 @@
     <arg name="frontier_min_clearance" value="0.75"/>
     <arg name="rl_target_replan_period" value="20.0"/>
     <arg name="rl_target_reached_dist" value="1.0"/>
+    <arg name="rl_target_reached_yaw" value="0.25"/>
+    <arg name="rl_target_reached_tilt" value="0.20"/>
     <arg name="rl_selection_timeout" value="2.0"/>
     <arg name="rl_max_offset_xy" value="1.0"/>
     <arg name="rl_max_offset_z" value="0.5"/>

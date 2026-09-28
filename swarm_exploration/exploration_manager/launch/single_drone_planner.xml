@@ -44,6 +44,8 @@
   <arg name="frontier_min_clearance" default="0.21"/>
   <arg name="rl_target_replan_period" default="2.0"/>
   <arg name="rl_target_reached_dist" default="1.0"/>
+  <arg name="rl_target_reached_yaw" default="0.25"/>
+  <arg name="rl_target_reached_tilt" default="0.20"/>
   <arg name="map_chunk_size" default="200"/>
   <arg name="map_chunk_flush_interval" default="0.25"/>
   <arg name="map_use_udpros" default="false"/>
@@ -167,6 +169,8 @@
     <param name="fsm/use_rl_navigation" value="$(arg use_rl_navigation)" type="bool"/>
     <param name="fsm/rl_target_replan_period" value="$(arg rl_target_replan_period)" type="double"/>
     <param name="fsm/rl_target_reached_dist" value="$(arg rl_target_reached_dist)" type="double"/>
+    <param name="fsm/rl_target_reached_yaw" value="$(arg rl_target_reached_yaw)" type="double"/>
+    <param name="fsm/rl_target_reached_tilt" value="$(arg rl_target_reached_tilt)" type="double"/>
     <param name="fsm/rl_selection_timeout" value="$(arg rl_selection_timeout)" type="double"/>
     <param name="fsm/rl_max_offset_xy" value="$(arg rl_max_offset_xy)" type="double"/>
     <param name="fsm/rl_max_offset_z" value="$(arg rl_max_offset_z)" type="double"/>

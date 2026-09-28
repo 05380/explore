@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from .isaac_adapter import validate_backend_shapes
+from .isaac_adapter import validate_backend_shapes, validate_step_info
 from .model import CentralizedCritic, SharedRecurrentActor
 from .smoke_env import ContractSmokeEnv
 from .storage import RolloutStorage, generalized_advantage_estimate
@@ -107,12 +107,39 @@ class RMAPPOTrainer:
         collision_sum = 0.0
         goal_sum = 0.0
         coverage_sum = 0.0
+        step_metric_sums = {
+            name: 0.0
+            for name in (
+                "obstacle_collision",
+                "inter_drone_collision",
+                "out_of_bounds",
+                "stall",
+                "safety_takeover",
+            )
+        }
+        episode_metric_sums = {
+            name: 0.0
+            for name in (
+                "episode_finished",
+                "episode_success",
+                "episode_collision",
+                "episode_obstacle_collision",
+                "episode_inter_drone_collision",
+                "episode_timeout",
+                "episode_stall",
+                "episode_out_of_bounds",
+                "episode_safety_takeover",
+                "coverage_target_reached",
+                "coverage_target_steps",
+            )
+        }
         for _ in range(int(ppo["rollout_steps"])):
             hidden_before = hidden
             with torch.no_grad():
                 action, log_prob, _, next_hidden = self.actor.step(observation, hidden)
                 value = self.critic(critic_state)
             next_observation, next_critic_state, reward, done, info = self.backend.step(action)
+            validate_step_info(info, self.backend.num_envs)
             done_agents = done.unsqueeze(-1).expand(-1, self.backend.num_agents)
             storage.add(
                 observation,
@@ -130,6 +157,10 @@ class RMAPPOTrainer:
             collision_sum += float(info["collision"].mean())
             goal_sum += float(info["goal_reached"].mean())
             coverage_sum += float(info["coverage"].mean())
+            for key in step_metric_sums:
+                step_metric_sums[key] += float(info[key].mean())
+            for key in episode_metric_sums:
+                episode_metric_sums[key] += float(info[key].sum())
             hidden = next_hidden * (~done_agents).unsqueeze(-1)
             episode_start = done_agents
             observation = next_observation
@@ -154,11 +185,40 @@ class RMAPPOTrainer:
         }
         rollout_metrics.update(
             {
-                "env/collision_team_rate": collision_sum / steps,
+                "env/collision_step_rate": collision_sum / steps,
                 "env/goals_per_swarm_step": goal_sum / steps,
                 "env/coverage_mean": coverage_sum / steps,
                 "rollout/reward_mean": float(batch["rewards"].mean()),
             }
+        )
+        for key, value in step_metric_sums.items():
+            rollout_metrics[f"env/{key}_step_rate"] = value / steps
+        episode_count = episode_metric_sums["episode_finished"]
+        rollout_metrics["episode/count"] = episode_count
+        for key in (
+            "episode_success",
+            "episode_collision",
+            "episode_obstacle_collision",
+            "episode_inter_drone_collision",
+            "episode_timeout",
+            "episode_stall",
+            "episode_out_of_bounds",
+            "episode_safety_takeover",
+        ):
+            name = key[len("episode_"):]
+            rollout_metrics[f"episode/{name}_count"] = episode_metric_sums[key]
+            rollout_metrics[f"episode/{name}_rate"] = (
+                episode_metric_sums[key] / episode_count if episode_count > 0.0 else 0.0
+            )
+        rollout_metrics["episode/collision_free_success_rate"] = rollout_metrics[
+            "episode/success_rate"
+        ]
+        coverage_hits = episode_metric_sums["coverage_target_reached"]
+        rollout_metrics["episode/coverage_target_count"] = coverage_hits
+        rollout_metrics["episode/time_to_coverage_s_mean"] = (
+            episode_metric_sums["coverage_target_steps"] /
+            (coverage_hits * float(self.cfg["experiment"]["control_hz"]))
+            if coverage_hits > 0.0 else 0.0
         )
         return batch, observation, critic_state, hidden, episode_start, rollout_metrics
 
@@ -286,7 +346,7 @@ class RMAPPOTrainer:
                 print(
                     f"update={self.update_index} transitions={self.agent_transitions} "
                     f"reward={metrics['rollout/reward_mean']:.4f} "
-                    f"collision={metrics['env/collision_team_rate']:.4f} "
+                    f"collision_step={metrics['env/collision_step_rate']:.4f} "
                     f"kl={metrics['policy/approx_kl']:.5f}"
                 )
             if self.update_index % int(self.cfg["training"]["checkpoint_interval_updates"]) == 0:
@@ -303,18 +363,62 @@ class RMAPPOTrainer:
         collisions = 0.0
         goals = 0.0
         coverage = 0.0
+        episode_sums: Dict[str, float] = {
+            key: 0.0
+            for key in (
+                "episode_finished",
+                "episode_success",
+                "episode_collision",
+                "episode_obstacle_collision",
+                "episode_inter_drone_collision",
+                "episode_timeout",
+                "episode_stall",
+                "episode_out_of_bounds",
+                "episode_safety_takeover",
+                "coverage_target_reached",
+                "coverage_target_steps",
+            )
+        }
         for _ in range(steps):
             action, _, _, next_hidden = self.actor.step(observation, hidden, deterministic=True)
             observation, critic_state, reward, done, info = self.backend.step(action)
+            validate_step_info(info, self.backend.num_envs)
             done_agents = done.unsqueeze(-1).expand(-1, self.backend.num_agents)
             hidden = next_hidden * (~done_agents).unsqueeze(-1)
             reward_sum += float(reward.mean())
             collisions += float(info["collision"].mean())
             goals += float(info["goal_reached"].mean())
             coverage += float(info["coverage"].mean())
-        return {
+            for key in episode_sums:
+                episode_sums[key] += float(info[key].sum())
+        episode_count = episode_sums["episode_finished"]
+        coverage_hits = episode_sums["coverage_target_reached"]
+        result = {
             "reward_mean": reward_sum / steps,
-            "collision_team_rate": collisions / steps,
+            "collision_step_rate": collisions / steps,
             "goals_per_swarm_step": goals / steps,
             "coverage_mean": coverage / steps,
+            "episode_count": episode_count,
+            "coverage_target_episode_count": coverage_hits,
+            "time_to_coverage_s_mean": (
+                episode_sums["coverage_target_steps"] /
+                (coverage_hits * float(self.cfg["experiment"]["control_hz"]))
+                if coverage_hits > 0.0 else 0.0
+            ),
         }
+        for key in (
+            "episode_success",
+            "episode_collision",
+            "episode_obstacle_collision",
+            "episode_inter_drone_collision",
+            "episode_timeout",
+            "episode_stall",
+            "episode_out_of_bounds",
+            "episode_safety_takeover",
+        ):
+            result[f"{key[len('episode_'):]}_episode_rate"] = (
+                episode_sums[key] / episode_count if episode_count > 0.0 else 0.0
+            )
+            result[f"{key[len('episode_'):]}_episode_count"] = episode_sums[key]
+        result["collision_free_success_rate"] = result["success_episode_rate"]
+        return result

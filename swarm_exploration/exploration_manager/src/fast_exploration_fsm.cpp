@@ -38,6 +38,8 @@ void FastExplorationFSM::init(ros::NodeHandle& nh) {
   nh.param("fsm/use_rl_navigation", fp_->use_rl_navigation_, false);
   nh.param("fsm/rl_target_replan_period", fp_->rl_target_replan_period_, 2.0);
   nh.param("fsm/rl_target_reached_dist", fp_->rl_target_reached_dist_, 1.0);
+  nh.param("fsm/rl_target_reached_yaw", fp_->rl_target_reached_yaw_, 0.25);
+  nh.param("fsm/rl_target_reached_tilt", fp_->rl_target_reached_tilt_, 0.20);
   nh.param("fsm/rl_selection_timeout", fp_->rl_selection_timeout_, 2.0);
   nh.param("fsm/rl_max_offset_xy", fp_->rl_max_offset_xy_, 1.0);
   nh.param("fsm/rl_max_offset_z", fp_->rl_max_offset_z_, 0.5);
@@ -60,9 +62,13 @@ void FastExplorationFSM::init(ros::NodeHandle& nh) {
   fd_->rl_target_id_ = 0;
   fd_->rl_target_plan_time_ = ros::Time(0);
   fd_->rl_task_publish_time_ = ros::Time(0);
+  fd_->rl_observation_start_time_ = ros::Time(0);
   fd_->rl_waiting_for_selection_ = false;
   fd_->rl_have_selected_target_ = false;
+  fd_->rl_navigation_reached_ = false;
   fd_->rl_selected_candidate_ = -1;
+  fd_->rl_selected_frontier_id_ = -1;
+  fd_->rl_observation_start_update_ = 0;
 
   /* Ros sub, pub and timer */
   exec_timer_ = nh.createTimer(ros::Duration(0.01), &FastExplorationFSM::FSMCallback, this);
@@ -262,10 +268,43 @@ void FastExplorationFSM::FSMCallback(const ros::TimerEvent& e) {
         }
 
         const bool target_invalid = !isRLTargetValid(expl_manager_->ed_->next_pos_);
-        bool need_replan = target_dist < fp_->rl_target_reached_dist_ || target_invalid ||
+        const bool navigation_reached = target_dist < fp_->rl_target_reached_dist_;
+        const double yaw_error = std::fabs(std::atan2(
+            std::sin(fd_->odom_yaw_ - expl_manager_->ed_->next_yaw_),
+            std::cos(fd_->odom_yaw_ - expl_manager_->ed_->next_yaw_)));
+        const Eigen::Vector3d body_z =
+            fd_->odom_orient_.toRotationMatrix().block<3, 1>(0, 2);
+        const double tilt_error = std::acos(std::max(-1.0, std::min(1.0, body_z.z())));
+        const bool heading_reached = yaw_error < fp_->rl_target_reached_yaw_ &&
+            tilt_error < fp_->rl_target_reached_tilt_;
+        const uint64_t sensor_updates = expl_manager_->sdf_map_->getSensorUpdateCount();
+
+        // The depth camera is rigidly attached to the vehicle. Reaching xyz is
+        // therefore only a navigation event: the vehicle must also reach the
+        // requested yaw, then fuse at least one newer local sensor frame.
+        if (navigation_reached && heading_reached && !fd_->rl_navigation_reached_) {
+          fd_->rl_navigation_reached_ = true;
+          fd_->rl_observation_start_update_ = sensor_updates;
+          fd_->rl_observation_start_time_ = tn;
+          ROS_INFO("RL viewpoint navigation reached; waiting for a body-fixed camera frame");
+        }
+        const bool sensor_observation_complete = navigation_reached && heading_reached &&
+            fd_->rl_navigation_reached_ &&
+            sensor_updates > fd_->rl_observation_start_update_ &&
+            expl_manager_->sdf_map_->getLastSensorUpdateTime() >=
+                fd_->rl_observation_start_time_;
+        const bool selected_frontier_covered = !fd_->go_back_ &&
+            fd_->rl_selected_frontier_id_ >= 0 &&
+            expl_manager_->frontier_finder_->isFrontierCovered(fd_->rl_selected_frontier_id_);
+        const bool observation_complete = sensor_observation_complete || selected_frontier_covered;
+
+        bool need_replan = observation_complete || target_invalid ||
             target_age > fp_->rl_target_replan_period_ || expl_manager_->ed_->reallocated_;
-        if (!fd_->go_back_ && expl_manager_->frontier_finder_->isFrontierCovered())
-          need_replan = true;
+
+        if (observation_complete) {
+          ROS_INFO("RL viewpoint observation completed (frame=%d, frontier=%d)",
+              sensor_observation_complete, selected_frontier_covered);
+        }
 
         if (need_replan) {
           if (fd_->go_back_) {
@@ -869,8 +908,12 @@ void FastExplorationFSM::rlViewpointSelectionCallback(
   ed->next_pos_ = target;
   ed->next_yaw_ = target_yaw;
   fd_->rl_selected_candidate_ = index;
+  fd_->rl_selected_frontier_id_ = ed->rl_candidate_frontier_ids_[index];
   fd_->rl_waiting_for_selection_ = false;
   fd_->rl_have_selected_target_ = true;
+  fd_->rl_navigation_reached_ = false;
+  fd_->rl_observation_start_update_ = expl_manager_->sdf_map_->getSensorUpdateCount();
+  fd_->rl_observation_start_time_ = ros::Time(0);
   fd_->rl_target_plan_time_ = ros::Time::now();
   publishRLTarget(true);
   ROS_INFO("Accepted PPO viewpoint candidate %d for task %u", index, fd_->rl_target_id_);
@@ -885,6 +928,9 @@ void FastExplorationFSM::transitState(EXPL_STATE new_state, string pos_call) {
     if (fd_->rl_have_selected_target_) publishRLTarget(false);
     fd_->rl_have_selected_target_ = false;
     fd_->rl_waiting_for_selection_ = false;
+    fd_->rl_navigation_reached_ = false;
+    fd_->rl_selected_frontier_id_ = -1;
+    fd_->rl_observation_start_time_ = ros::Time(0);
   }
   state_ = new_state;
   ROS_INFO_STREAM("[" + pos_call + "]: Drone "

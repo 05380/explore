@@ -532,6 +532,14 @@ int SDFMap::getVoxelNum() {
   return mp_->map_voxel_num_[0] * mp_->map_voxel_num_[1] * mp_->map_voxel_num_[2];
 }
 
+uint64_t SDFMap::getSensorUpdateCount() const {
+  return mr_ ? mr_->sensor_update_count_ : 0;
+}
+
+ros::Time SDFMap::getLastSensorUpdateTime() const {
+  return mr_ ? mr_->last_sensor_update_time_ : ros::Time(0);
+}
+
 bool SDFMap::getBaseCoor(const int& id, Eigen::Vector4d& transform) {
   if (mp_->no_drone_1_ && id == 1) {
     transform = Eigen::Vector4d(0, 0, 0, 0);

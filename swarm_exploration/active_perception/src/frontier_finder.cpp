@@ -19,6 +19,9 @@
 #include <pcl/filters/voxel_grid.h>
 
 #include <Eigen/Eigenvalues>
+#include <algorithm>
+#include <cmath>
+#include <unordered_set>
 
 namespace fast_planner {
 FrontierFinder::FrontierFinder(const EDTEnvironment::Ptr& edt, ros::NodeHandle& nh) {
@@ -722,24 +725,38 @@ void FrontierFinder::getSwarmCostMatrix(const vector<Vector3d>& positions,
 }
 
 int FrontierFinder::computeGainOfView(const Eigen::Vector3d& pos, const double& yaw) {
-  percep_utils_->setPose(pos, yaw);
+  // Approximate the body-fixed depth camera with one ray per voxel-width at
+  // maximum range.  Count each unknown voxel at most once and stop every ray
+  // at the first known obstacle.  This prevents a wall from contributing the
+  // unknown volume hidden behind it, which the previous FOV-box sampling did.
+  const double max_dist = percep_utils_->getMaxDistance();
+  if (max_dist <= 0.0 || resolution_ <= 0.0) return 0;
 
-  // Compute info gain in the FOV
-  Eigen::Vector3d bmin, bmax;
-  percep_utils_->getFOVBoundingBox(bmin, bmax);
+  const double angular_step = std::max(0.01, std::atan2(resolution_, max_dist));
+  const double top = percep_utils_->getTopAngle();
+  const double left = percep_utils_->getLeftAngle();
+  const double right = percep_utils_->getRightAngle();
+  std::unordered_set<int> visible_unknown;
+  Eigen::Vector3i idx;
 
-  int gain = 0;
-  for (double sx = bmin[0]; sx <= bmax[0]; sx += 0.8) {
-    for (double sy = bmin[1]; sy <= bmax[1]; sy += 0.8) {
-      for (double sz = bmin[2]; sz <= bmax[2]; sz += 0.8) {
-        Eigen::Vector3d sample(sx, sy, sz);
-        if (percep_utils_->insideFOV(sample) &&
-            edt_env_->sdf_map_->getOccupancy(sample) == SDFMap::UNKNOWN)
-          ++gain;
+  for (double phi_h = -right; phi_h <= left + 1e-6; phi_h += angular_step) {
+    for (double phi_v = -top; phi_v <= top + 1e-6; phi_v += angular_step) {
+      const double cos_v = std::cos(phi_v);
+      const Eigen::Vector3d end = pos + max_dist * Eigen::Vector3d(
+          cos_v * std::cos(yaw + phi_h), cos_v * std::sin(yaw + phi_h), std::sin(phi_v));
+      raycaster_->input(pos, end);
+      while (raycaster_->nextId(idx)) {
+        if (!edt_env_->sdf_map_->isInBox(idx)) break;
+        const int occupancy = edt_env_->sdf_map_->getOccupancy(idx);
+        if (occupancy == SDFMap::OCCUPIED ||
+            edt_env_->sdf_map_->getInflateOccupancy(idx) == 1)
+          break;
+        if (occupancy == SDFMap::UNKNOWN)
+          visible_unknown.insert(edt_env_->sdf_map_->toAddress(idx));
       }
     }
   }
-  return gain;
+  return static_cast<int>(visible_unknown.size());
 }
 
 int FrontierFinder::deleteFrontiers(const vector<uint16_t>& ids) {
@@ -918,22 +935,46 @@ bool FrontierFinder::isFrontierCovered() {
 
   auto checkChanges = [&](const list<Frontier>& frontiers) {
     for (auto ftr : frontiers) {
-      // haveOverlap(ftr.box_min_, ftr.box_max_, update_min, update_max)
-      if (!haveAnyOverlap(ftr.box_min_, ftr.box_max_, mins, maxs)) continue;
-      const int change_thresh = min_view_finish_fraction_ * ftr.cells_.size();
-      int change_num = 0;
-      for (auto cell : ftr.cells_) {
-        Eigen::Vector3i idx;
-        edt_env_->sdf_map_->posToIndex(cell, idx);
-        if (!(knownfree(idx) && isNeighborUnknown(idx)) && ++change_num >= change_thresh)
-          return true;
-      }
+      if (isFrontierChangedInUpdates(ftr, mins, maxs)) return true;
     }
     return false;
   };
 
   if (checkChanges(frontiers_) || checkChanges(dormant_frontiers_)) return true;
 
+  return false;
+}
+
+bool FrontierFinder::isFrontierCovered(const int frontier_id) {
+  Vector3d update_min, update_max;
+  edt_env_->sdf_map_->getUpdatedBox(update_min, update_max);
+  vector<Eigen::Vector3d> chunk_mins, chunk_maxs;
+  edt_env_->sdf_map_->mm_->getChunkBoxes(chunk_mins, chunk_maxs, false);
+  vector<Eigen::Vector3d> mins = { update_min };
+  vector<Eigen::Vector3d> maxs = { update_max };
+  mins.insert(mins.end(), chunk_mins.begin(), chunk_mins.end());
+  maxs.insert(maxs.end(), chunk_maxs.begin(), chunk_maxs.end());
+
+  for (const auto& frontier : frontiers_) {
+    if (frontier.id_ == frontier_id)
+      return isFrontierChangedInUpdates(frontier, mins, maxs);
+  }
+  // The selected frontier disappearing from the active list also means there
+  // is no reason to keep the old observation target.
+  return true;
+}
+
+bool FrontierFinder::isFrontierChangedInUpdates(const Frontier& frontier,
+    const vector<Vector3d>& mins, const vector<Vector3d>& maxs) {
+  if (!haveAnyOverlap(frontier.box_min_, frontier.box_max_, mins, maxs)) return false;
+  const int change_thresh = std::max(
+      1, static_cast<int>(std::ceil(min_view_finish_fraction_ * frontier.cells_.size())));
+  int change_num = 0;
+  for (const auto& cell : frontier.cells_) {
+    Eigen::Vector3i idx;
+    edt_env_->sdf_map_->posToIndex(cell, idx);
+    if (!(knownfree(idx) && isNeighborUnknown(idx)) && ++change_num >= change_thresh) return true;
+  }
   return false;
 }
 

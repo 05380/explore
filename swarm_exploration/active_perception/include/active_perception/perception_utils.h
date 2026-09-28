@@ -27,6 +27,10 @@ public:
   void getFOV(vector<Vector3d>& list1, vector<Vector3d>& list2);
   bool insideFOV(const Vector3d& point);
   void getFOVBoundingBox(Vector3d& bmin, Vector3d& bmax);
+  double getTopAngle() const { return top_angle_; }
+  double getLeftAngle() const { return left_angle_; }
+  double getRightAngle() const { return right_angle_; }
+  double getMaxDistance() const { return max_dist_; }
 
 private:
   // Data

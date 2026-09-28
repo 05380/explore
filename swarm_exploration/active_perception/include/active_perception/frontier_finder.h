@@ -80,6 +80,7 @@ public:
 
   void setNextFrontier(const int& id);
   bool isFrontierCovered();
+  bool isFrontierCovered(const int frontier_id);
   void wrapYaw(double& yaw);
   int computeGainOfView(const Eigen::Vector3d& pos, const double& yaw);
   int deleteFrontiers(const vector<uint16_t>& ids);
@@ -95,6 +96,8 @@ private:
   bool haveOverlap(
       const Vector3d& min1, const Vector3d& max1, const Vector3d& min2, const Vector3d& max2);
   bool haveAnyOverlap(const Vector3d& min1, const Vector3d& max1, const vector<Vector3d>& mins,
+      const vector<Vector3d>& maxs);
+  bool isFrontierChangedInUpdates(const Frontier& frontier, const vector<Vector3d>& mins,
       const vector<Vector3d>& maxs);
   void computeFrontierInfo(Frontier& frontier);
   void downsample(const vector<Vector3d>& cluster_in, vector<Vector3d>& cluster_out);

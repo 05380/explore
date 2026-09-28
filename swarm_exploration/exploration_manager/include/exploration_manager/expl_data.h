@@ -29,9 +29,11 @@ struct FSMData {
   ros::Time last_check_frontier_time_;
   ros::Time rl_target_plan_time_;
   ros::Time rl_task_publish_time_;
+  ros::Time rl_observation_start_time_;
   uint32_t rl_target_id_;
-  bool rl_waiting_for_selection_, rl_have_selected_target_;
-  int rl_selected_candidate_;
+  uint64_t rl_observation_start_update_;
+  bool rl_waiting_for_selection_, rl_have_selected_target_, rl_navigation_reached_;
+  int rl_selected_candidate_, rl_selected_frontier_id_;
 
   Eigen::Vector3d start_pos_;
 };
@@ -44,6 +46,8 @@ struct FSMParam {
   bool use_rl_navigation_;
   double rl_target_replan_period_;
   double rl_target_reached_dist_;
+  double rl_target_reached_yaw_;
+  double rl_target_reached_tilt_;
   double rl_selection_timeout_;
   double rl_max_offset_xy_, rl_max_offset_z_, rl_max_yaw_offset_;
 

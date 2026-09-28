@@ -14,10 +14,13 @@
 - `RLTask` 候选编码与 valid mask；候选选择只在 `decision_mask=1` 的任务事件计入 PPO log-prob/entropy，速度仍为 20 Hz；
 - 递归序列 minibatch、GAE、PPO clip、value clip、梯度裁剪和 checkpoint；
 - 目标进展、新体素、团队唯一体素、重复观测、近障碍、机间距、动作变化、停滞、碰撞和越界的分项奖励；
+- 固定机载相机视锥的体素射线统计；相机没有独立动作，改变视线必须通过无人机 yaw；
+- 将“到达位置”和“完成观测”分开，后者还要求 yaw 对准并融合该姿态下的新深度帧；
 - 新体素奖励单步封顶，防止一帧深度生成的大量体素压倒碰撞惩罚；
+- 按完整回合统计成功、碰撞、障碍碰撞、机间碰撞、超时、停滞、越界、安全接管和达到覆盖率所需时间；
 - 无 Isaac 依赖的 `smoke` 合同环境、评估、TorchScript actor 导出和单元测试。
 
-`smoke` 环境只验证训练代码、维度、速度限幅、奖励与循环能否工作。它用圆柱近似障碍且没有真实飞行动力学，产出的权重不得用于真机，也不代表避障训练完成。
+`smoke` 环境只验证训练代码、维度、速度限幅、奖励与循环能否工作。它现在会把圆柱深度图沿固定机载相机视锥反投影并统计射线经过的体素，不再把无人机所在体素当成“新观测”；但它仍没有真实飞行动力学、纹理、完整建筑网格或真实传感器噪声，产出的权重不得用于真机，也不代表避障训练完成。
 
 尚未完成的是高保真 `isaac` backend。旧 `env.py` 是单机 4 m LiDAR 任务，代码会在选择 `--backend isaac` 时明确报错，防止误训。Isaac backend 必须按
 `training/training/racer_rmappo/isaac_adapter.py` 返回深度、ego、已选 target、RACER candidates、decision mask、邻机状态和 centralized critic state。
@@ -31,9 +34,12 @@
 ```bash
 cd /path/to/RACER-main/training
 python training/scripts/diagnose_rmappo.py
+python training/scripts/check_ros_training_config.py
 ```
 
 当前 macOS/Apple Silicon 工作站没有 CUDA，只适合静态检查；即使安装 CPU PyTorch，也只能运行小规模 smoke 测试。
+
+`check_ros_training_config.py` 会逐项比较训练 YAML 与 ROS launch 中的地图尺寸、分辨率、膨胀、相机内参/FOV/量程、速度、飞行边界、候选残差和观测完成阈值；任何不一致都会返回非零退出码，建议在每次训练和部署前运行，并放进 CI。
 
 ## 先跑合同测试
 
@@ -51,6 +57,10 @@ python training/scripts/eval_rmappo.py \
 ```
 
 确认 loss、KL、entropy 都为有限值，reward 会变化，并且测试通过后，才开始实现/运行 Isaac backend。
+
+回合指标以 `episode/count` 为分母。`env/collision_step_rate` 只是发生碰撞的仿真步比例，不能当成回合碰撞率；验收主要查看 `episode/collision_rate`、`episode/collision_free_success_rate`、两类碰撞率、超时率和 `episode/time_to_coverage_s_mean`。没有完整回合结束时回合率暂记为 0，同时 `episode/count=0`，不能把这个 0 解读成安全。
+
+覆盖率必须定义为“团队已观测体素数 / 本回合可观测且可探索体素数”。Isaac 场景生成时应保存 ground-truth 可探索 mask，排除建筑实体内部、地图外部和永久不可达空间；否则 98% 可能在数学上不可达。`smoke` 环境为了检查张量合同暂以整个长方体为分母，而且无障碍方向没有合成深度返回，因此不能用它的覆盖率或 `time_to_coverage` 判断探索性能。评估时必须同时查看 `coverage_target_episode_count`，该值为 0 时，均值 0 秒表示“无样本”，不是瞬间完成。
 
 还应确认首步 `decision_mask=1`、普通控制步为 0、到达目标后只脉冲一次；`candidates` 为 `[E,A,16,9]`，padding 的 valid=0 且从不被采样。
 
@@ -90,6 +100,8 @@ python training/scripts/export_rmappo_actor.py \
 导出时同时生成 `.json` 元数据。ROS 推理节点必须严格复用相同的 inverse-depth、resize、frame stack、字段顺序和动作缩放；任何一项不一致都会造成 sim-to-real 输入漂移。
 
 导出的动作字段顺序为：`[vx, vy, vz, yaw_rate, candidate_index, dx_body, dy_body, dz, dyaw]`。仅当收到新的 `RLTask` 时发布 `RLViewpointSelection`；速度四维每个控制周期发布。残差是归一化值，部署端按 `[1.0,1.0,0.5] m` 和 `0.35 rad` 缩放；xy 残差按选择时的机体系解释，ROS FSM 再旋转到 world 系。
+
+相机是刚性安装，不存在独立云台动作。训练和部署都必须用机体完整姿态计算相机位姿；高层候选提供目标 yaw，低层策略通过 `yaw_rate` 转动机体。ROS 端只有在位置误差小于 1 m、yaw 误差小于 0.25 rad、机体倾斜小于 0.20 rad，并且此后融合了时间戳更新的本机深度帧时，才把观测点判为完成；目标 frontier 已由本机或队友覆盖时也可提前完成。
 
 ## 地图融合
 

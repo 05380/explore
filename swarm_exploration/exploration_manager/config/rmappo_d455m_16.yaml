@@ -27,6 +27,10 @@ world:
 
 camera:
   model: PXYZ-D455M
+  # The camera has no gimbal. Its optical pose is rigidly determined by the
+  # vehicle pose, so yaw_rate is the only policy action that turns the view.
+  fixed_to_body: true
+  observation_tilt_tolerance_rad: 0.20
   width: 640
   height: 360
   horizontal_fov_deg: 58.0
@@ -56,7 +60,8 @@ actor_observation:
     fields: [relative_body_xyz, relative_distance, yaw_sin_cos, visible_gain, frontier_rank, valid]
     feature_dim: 9
     distance_normalizer_m: 20.0
-    visible_gain_normalizer: 100.0
+    # Occlusion-aware 0.5 m raycasting can expose O(10^4) unique voxels.
+    visible_gain_normalizer: 20000.0
   neighbors:
     max_neighbors: 5
     communication_radius_m: 30.0
@@ -146,6 +151,13 @@ training:
   log_interval_updates: 1
   output_dir: training/runs/rmappo_d455m
   terminate_team_on_agent_collision: true
+  smoke_goal_distance_m: 1.0
+  smoke_goal_yaw_rad: 0.25
+  # For the Isaac backend, divide by the episode's observable/reachable voxel
+  # mask. Do not include solid building interiors or permanently unreachable
+  # space in the denominator. The smoke backend uses the full box only as a
+  # data-contract check, so this threshold is not a smoke-training target.
+  coverage_success_threshold: 0.98
   seed: 0
   device: cuda:0
 

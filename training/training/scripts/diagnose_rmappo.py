@@ -48,6 +48,7 @@ def main() -> None:
     }
     try:
         from racer_rmappo.config import load_config
+        from check_ros_training_config import check_contract
 
         cfg = load_config(args.config)
         report["config"] = {
@@ -61,6 +62,7 @@ def main() -> None:
             "max_candidates": cfg["actor_observation"]["racer_candidates"]["max_candidates"],
             "hybrid_action_fields": 9,
         }
+        report["ros_training_contract"] = check_contract(cfg)
     except Exception as exc:
         report["config"] = {"valid": False, "error": str(exc)}
     print(json.dumps(report, indent=2, ensure_ascii=False))

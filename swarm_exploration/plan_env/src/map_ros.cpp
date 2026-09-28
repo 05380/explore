@@ -93,6 +93,8 @@ void MapROS::init() {
   sync_cloud_pose_->registerCallback(boost::bind(&MapROS::cloudPoseCallback, this, _1, _2));
 
   map_start_time_ = ros::Time::now();
+  sensor_update_count_ = 0;
+  last_sensor_update_time_ = ros::Time(0);
 }
 
 void MapROS::visCallback(const ros::TimerEvent& e) {
@@ -172,6 +174,9 @@ void MapROS::depthPoseCallback(
     local_updated_ = false;
   }
 
+  ++sensor_update_count_;
+  last_sensor_update_time_ = img->header.stamp.isZero() ? ros::Time::now() : img->header.stamp;
+
   auto t2 = ros::Time::now();
   fuse_time_ += (t2 - t1).toSec();
   max_fuse_time_ = max(max_fuse_time_, (t2 - t1).toSec());
@@ -200,6 +205,9 @@ void MapROS::cloudPoseCallback(
     esdf_need_update_ = enable_esdf_;
     local_updated_ = false;
   }
+
+  ++sensor_update_count_;
+  last_sensor_update_time_ = msg->header.stamp.isZero() ? ros::Time::now() : msg->header.stamp;
 }
 
 // void MapROS::basecoorCallback(const swarm_msgs::swarm_drone_basecoorConstPtr& msg) {

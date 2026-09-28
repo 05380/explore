@@ -7,6 +7,7 @@
 #include <queue>
 #include <ros/ros.h>
 #include <tuple>
+#include <cstdint>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -63,6 +64,8 @@ public:
   void getUpdatedBox(Eigen::Vector3d& bmin, Eigen::Vector3d& bmax, bool reset = false);
   double getResolution();
   int getVoxelNum();
+  uint64_t getSensorUpdateCount() const;
+  ros::Time getLastSensorUpdateTime() const;
   bool getBaseCoor(const int& id, Eigen::Vector4d& transform);
 
   // Swarm
