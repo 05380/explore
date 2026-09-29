@@ -140,11 +140,12 @@ class IsaacSingleDroneProbe:
         self.render = bool(render)
 
         # These imports must remain after SimulationApp is constructed.
-        import omni.isaac.orbit.sim as sim_utils
         from omni.isaac.core.simulation_context import SimulationContext
+        from omni.isaac.core.utils.stage import get_current_stage
         from omni.isaac.version import get_version
         from omni_drones.controllers import LeePositionController
         from omni_drones.robots.drone import MultirotorBase
+        from pxr import Gf, PhysxSchema, UsdGeom, UsdLux, UsdPhysics
 
         sim_cfg = cfg["sim"]
         self.isaac_version = ".".join(str(item) for item in get_version())
@@ -160,50 +161,56 @@ class IsaacSingleDroneProbe:
         )
 
         scene_cfg = cfg["scene"]
-        # A local static cuboid avoids a runtime dependency on the remote
-        # Nucleus ground-plane USD during headless diagnostics.
-        ground_cfg = sim_utils.CuboidCfg(
+        stage = get_current_stage()
+
+        def spawn_static_cuboid(
+            prim_path: str,
+            position: Sequence[float],
+            size: Sequence[float],
+            color: Sequence[float] | None = None,
+        ) -> None:
+            """Create a local USD collider without requiring Isaac Orbit."""
+            cube = UsdGeom.Cube.Define(stage, prim_path)
+            cube.CreateSizeAttr(1.0)
+            cube.AddTranslateOp().Set(
+                Gf.Vec3d(*(float(item) for item in position))
+            )
+            cube.AddScaleOp().Set(Gf.Vec3d(*(float(item) for item in size)))
+            if color is not None:
+                cube.CreateDisplayColorAttr().Set(
+                    [Gf.Vec3f(*(float(item) for item in color))]
+                )
+
+            prim = cube.GetPrim()
+            UsdPhysics.CollisionAPI.Apply(prim)
+            physx_collision = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+            physx_collision.CreateContactOffsetAttr().Set(0.02)
+            physx_collision.CreateRestOffsetAttr().Set(0.0)
+
+        # Local USD primitives avoid both a remote Nucleus asset dependency and
+        # the optional ``omni.isaac.orbit`` extension used by older OmniDrones.
+        spawn_static_cuboid(
+            "/World/defaultGroundPlane",
+            position=(0.0, 0.0, -0.05),
             size=(
                 float(scene_cfg["size_m"][0]),
                 float(scene_cfg["size_m"][1]),
                 0.10,
             ),
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                collision_enabled=True,
-                contact_offset=0.02,
-                rest_offset=0.0,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=tuple(
-                    float(item) for item in scene_cfg["ground_color"]
-                )
-            ),
-        )
-        ground_cfg.func(
-            "/World/defaultGroundPlane",
-            ground_cfg,
-            translation=(0.0, 0.0, -0.05),
+            color=scene_cfg["ground_color"],
         )
 
-        light_cfg = sim_utils.DistantLightCfg(
-            intensity=3000.0, color=(0.75, 0.75, 0.75)
-        )
-        light_cfg.func("/World/P1ProbeLight", light_cfg)
+        light = UsdLux.DistantLight.Define(stage, "/World/P1ProbeLight")
+        light.CreateIntensityAttr(3000.0)
+        light.CreateColorAttr(Gf.Vec3f(0.75, 0.75, 0.75))
 
         self.obstacles = list(scene_cfg.get("obstacles", []))
+        UsdGeom.Xform.Define(stage, "/World/P1Obstacles")
         for obstacle in self.obstacles:
-            obstacle_cfg = sim_utils.CuboidCfg(
-                size=tuple(float(item) for item in obstacle["size_m"]),
-                collision_props=sim_utils.CollisionPropertiesCfg(
-                    collision_enabled=True,
-                    contact_offset=0.02,
-                    rest_offset=0.0,
-                ),
-            )
-            obstacle_cfg.func(
+            spawn_static_cuboid(
                 f"/World/P1Obstacles/{obstacle['name']}",
-                obstacle_cfg,
-                translation=tuple(float(item) for item in obstacle["position_m"]),
+                position=obstacle["position_m"],
+                size=obstacle["size_m"],
             )
 
         drone_model = str(cfg["drone"]["model"])

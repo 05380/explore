@@ -5,7 +5,7 @@
 ## 已实现内容
 
 - `configs/isaac_single.yaml`：30×30×5 m 单机场景、2 m/s 限速、静态障碍和验收阈值。
-- `racer_rmappo/isaac_single_env.py`：本地地面与障碍、Hummingbird、航向局部系速度/偏航指令及限幅、Lee 控制器、状态/接触力/越界遥测、完整 reset。动作约定为 x 向机头前方、y 向左、z 沿世界向上。
+- `racer_rmappo/isaac_single_env.py`：通过 Isaac Core/USD 原生 API 创建本地地面与障碍，不依赖可选的 `omni.isaac.orbit` 扩展；包含 Hummingbird、航向局部系速度/偏航指令及限幅、Lee 控制器、状态/接触力/越界遥测、完整 reset。动作约定为 x 向机头前方、y 向左、z 沿世界向上。
 - `scripts/diagnose_isaac_backend.py`：独立启动和关闭 `SimulationApp`，执行探针并保存 JSON 报告。
 - `tests/test_isaac_single_probe.py`：无需 Isaac 的配置与动作限幅回归测试。
 

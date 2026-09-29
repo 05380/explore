@@ -52,3 +52,9 @@ def test_shipped_probe_configuration_is_valid():
     assert cfg["control"]["command_frame"] == "yaw_local"
     assert cfg["scene"]["size_m"] == [30.0, 30.0, 5.0]
     assert cfg["app"]["multi_gpu"] is False
+
+
+def test_probe_scene_does_not_require_optional_orbit_extension():
+    source_path = TRAINING_PACKAGE / "racer_rmappo" / "isaac_single_env.py"
+    source = source_path.read_text(encoding="utf-8")
+    assert "import omni.isaac.orbit" not in source
