@@ -80,6 +80,10 @@ def validate_probe_config(cfg: Mapping[str, Any]) -> None:
         raise ValueError("control.max_speed_mps must be positive")
     if float(control["max_yaw_rate_rps"]) <= 0.0:
         raise ValueError("control.max_yaw_rate_rps must be positive")
+    if float(control["max_acceleration_mps2"]) <= 0.0:
+        raise ValueError("control.max_acceleration_mps2 must be positive")
+    if float(control["max_yaw_acceleration_rps2"]) <= 0.0:
+        raise ValueError("control.max_yaw_acceleration_rps2 must be positive")
     if int(control["random_command_interval_steps"]) < 1:
         raise ValueError("random_command_interval_steps must be at least one")
 
@@ -121,6 +125,40 @@ def yaw_local_velocity_to_world(velocity: Tensor, yaw: Tensor) -> Tensor:
     world_x = cosine * velocity[..., 0] - sine * velocity[..., 1]
     world_y = sine * velocity[..., 0] + cosine * velocity[..., 1]
     return torch.stack((world_x, world_y, velocity[..., 2]), dim=-1)
+
+
+def limit_vector_change(previous: Tensor, desired: Tensor, max_change: float) -> Tensor:
+    """Limit the norm of a vector change while preserving its direction."""
+    if previous.shape != desired.shape:
+        raise ValueError("previous and desired vectors must have identical shapes")
+    if max_change <= 0.0:
+        raise ValueError("max_change must be positive")
+    delta = desired - previous
+    delta_norm = delta.norm(dim=-1, keepdim=True)
+    scale = (float(max_change) / delta_norm.clamp_min(1e-9)).clamp(max=1.0)
+    return previous + delta * scale
+
+
+def limit_velocity_for_braking_distance(
+    position: Tensor,
+    velocity: Tensor,
+    lower: Tensor,
+    upper: Tensor,
+    braking_acceleration_mps2: float,
+) -> Tensor:
+    """Limit outward velocity so it can stop before an axis-aligned bound."""
+    if not (position.shape == velocity.shape == lower.shape == upper.shape):
+        raise ValueError("position, velocity and bounds must have identical shapes")
+    if braking_acceleration_mps2 <= 0.0:
+        raise ValueError("braking_acceleration_mps2 must be positive")
+    acceleration = float(braking_acceleration_mps2)
+    positive_limit = torch.sqrt(
+        2.0 * acceleration * (upper - position).clamp_min(0.0)
+    )
+    negative_limit = torch.sqrt(
+        2.0 * acceleration * (position - lower).clamp_min(0.0)
+    )
+    return torch.minimum(torch.maximum(velocity, -negative_limit), positive_limit)
 
 
 def quaternion_yaw_wxyz(quaternion: Tensor) -> Tensor:
@@ -244,6 +282,10 @@ class IsaacSingleDroneProbe:
         control = cfg["control"]
         self.max_speed = float(control["max_speed_mps"])
         self.max_yaw_rate = float(control["max_yaw_rate_rps"])
+        self.max_acceleration = float(control["max_acceleration_mps2"])
+        self.max_yaw_acceleration = float(
+            control["max_yaw_acceleration_rps2"]
+        )
         self.reference_margin = float(control["reference_boundary_margin_m"])
         self.contact_threshold = float(
             cfg["collision"]["contact_force_threshold_n"]
@@ -251,6 +293,7 @@ class IsaacSingleDroneProbe:
         self.target_position = self.spawn_position.reshape(1, 3).clone()
         self.target_yaw = torch.zeros(1, device=self.device)
         self.last_world_velocity_command = torch.zeros(3, device=self.device)
+        self.last_yaw_rate_command = torch.zeros(1, device=self.device)
         self.reset()
 
     def _flush(self) -> None:
@@ -265,6 +308,7 @@ class IsaacSingleDroneProbe:
         self.target_position.copy_(self.spawn_position.reshape(1, 3))
         self.target_yaw.zero_()
         self.last_world_velocity_command.zero_()
+        self.last_yaw_rate_command.zero_()
         self._flush()
         return self.telemetry()
 
@@ -326,16 +370,41 @@ class IsaacSingleDroneProbe:
 
         root_state = self._state()[..., :13].reshape(-1, 13)
         current_yaw = quaternion_yaw_wxyz(root_state[..., 3:7])
-        command_world_velocity = yaw_local_velocity_to_world(
+        desired_world_velocity = yaw_local_velocity_to_world(
             command_limited[:3].reshape(1, 3), current_yaw
+        ).reshape(3)
+
+        # A policy may change direction instantaneously, while a real multirotor
+        # cannot. Rate-limit the velocity reference before sending it to Lee.
+        command_world_velocity = limit_vector_change(
+            self.last_world_velocity_command,
+            desired_world_velocity,
+            self.max_acceleration * self.dt,
         )
-        self.last_world_velocity_command = command_world_velocity.reshape(3).detach().clone()
 
         reference_min = self.bounds_min + self.reference_margin
         reference_max = self.bounds_max - self.reference_margin
+        current_position = root_state[0, :3]
+        command_world_velocity = limit_velocity_for_braking_distance(
+            current_position,
+            command_world_velocity,
+            reference_min,
+            reference_max,
+            self.max_acceleration,
+        )
+        self.last_world_velocity_command.copy_(command_world_velocity.detach())
+
+        desired_yaw_rate = command_limited[3].reshape(1)
+        yaw_rate_delta = (desired_yaw_rate - self.last_yaw_rate_command).clamp(
+            -self.max_yaw_acceleration * self.dt,
+            self.max_yaw_acceleration * self.dt,
+        )
+        yaw_rate_command = self.last_yaw_rate_command + yaw_rate_delta
+        self.last_yaw_rate_command.copy_(yaw_rate_command.detach())
+
         self.target_position.add_(command_world_velocity * self.dt)
         self.target_position.clamp_(reference_min, reference_max)
-        self.target_yaw.add_(command_limited[3] * self.dt)
+        self.target_yaw.add_(yaw_rate_command * self.dt)
         self.target_yaw.copy_(
             torch.atan2(torch.sin(self.target_yaw), torch.cos(self.target_yaw))
         )
@@ -348,7 +417,10 @@ class IsaacSingleDroneProbe:
         )
         self.drone.apply_action(rotor_action)
         self.sim.step(render=self.render)
-        return self.telemetry(), command_limited.detach().clone()
+        applied_command = torch.cat(
+            (command_world_velocity, yaw_rate_command), dim=0
+        )
+        return self.telemetry(), applied_command.detach().clone()
 
     def _progress(self, name: str, step: int, steps: int, telemetry: Mapping[str, Any]) -> None:
         interval = max(int(self.cfg["probe"]["print_interval_steps"]), 1)
@@ -472,6 +544,7 @@ class IsaacSingleDroneProbe:
         requested_max_yaw_rate = 0.0
         limited_max_yaw_rate = 0.0
         actual_max_speed = 0.0
+        actual_overspeed_steps = 0
         squared_tracking_error = 0.0
         collision_steps = 0
         out_of_bounds_steps = 0
@@ -493,6 +566,7 @@ class IsaacSingleDroneProbe:
             requested_max_yaw_rate = max(requested_max_yaw_rate, float(raw[3].abs().item()))
             limited_max_yaw_rate = max(limited_max_yaw_rate, float(limited[3].abs().item()))
             actual_max_speed = max(actual_max_speed, float(actual_velocity.norm().item()))
+            actual_overspeed_steps += int(last["speed_mps"] > self.max_speed)
             squared_tracking_error += float(
                 (actual_velocity - self.last_world_velocity_command).square().sum().item()
             )
@@ -527,6 +601,9 @@ class IsaacSingleDroneProbe:
             "requested_max_yaw_rate_rps": requested_max_yaw_rate,
             "limited_max_yaw_rate_rps": limited_max_yaw_rate,
             "actual_max_speed_mps": actual_max_speed,
+            "actual_speed_limit_mps": self.max_speed,
+            "actual_overspeed_steps": actual_overspeed_steps,
+            "actual_overspeed_fraction": actual_overspeed_steps / max(steps, 1),
             "velocity_tracking_rmse_mps": velocity_rmse,
             "collision_steps": collision_steps,
             "out_of_bounds_steps": out_of_bounds_steps,

@@ -4,7 +4,7 @@
 
 ## 已实现内容
 
-- `configs/isaac_single.yaml`：30×30×5 m 单机场景、2 m/s 限速、静态障碍和验收阈值。
+- `configs/isaac_single.yaml`：30×30×5 m 单机场景、2 m/s 速度参考上限、2 m/s² 加速度上限、静态障碍和验收阈值。
 - `racer_rmappo/isaac_single_env.py`：通过 Isaac Core/USD 原生 API 创建本地地面与障碍，不依赖可选的 `omni.isaac.orbit` 扩展；包含 Hummingbird、航向局部系速度/偏航指令及限幅、Lee 控制器、状态/接触力/越界遥测、完整 reset。动作约定为 x 向机头前方、y 向左、z 沿世界向上。
 - `scripts/diagnose_isaac_backend.py`：独立启动和关闭 `SimulationApp`，执行探针并保存 JSON 报告。
 - `tests/test_isaac_single_probe.py`：无需 Isaac 的配置与动作限幅回归测试。
@@ -103,10 +103,11 @@ python -u training/scripts/diagnose_isaac_backend.py --probe contact --headless
 - `limited_max_yaw_rate_rps` 必须不超过 1 rad/s。
 - `velocity_tracking_rmse_mps` 衡量 Lee 控制器对速度参考的跟踪。
 - `actual_max_speed_mps` 是实际物理速度，不等于策略指令限幅。
+- `actual_overspeed_steps` 和 `actual_overspeed_fraction` 统计真实速度超过 2 m/s 的持续程度；瞬态超调必须与 `actual_max_speed_mps` 一起判断。
 - `collision_steps` 在随机无避障指令下可以大于 0，本阶段只记录，不把它单独判为失败。
 - `sim_steps_per_second` 和 `real_time_factor` 是未启用深度相机时的性能基线；下一阶段加入相机后要用相同并行数、步数和 headless 设置复测。
 
-如果 RMSE 高但悬停稳定，先把 `random_command_interval_steps` 从 125 增加到 200，判断是否只是指令切换过快；之后再考虑速度控制器增益。若实际速度明显超过 3 m/s，先检查参考位置积分与控制器增益，而不是修改 PPO。
+速度参考会先经过 2 m/s² 变化率限制，并在接近飞行边界时按制动距离削减外向速度。这是飞行包线约束，不替 PPO 做障碍避让。如果 RMSE 仍高但悬停稳定，先把 `random_command_interval_steps` 从 125 增加到 200，判断是否只是指令切换过快；之后再考虑速度控制器增益。若实际速度仍明显超过 3 m/s，先检查参考位置积分与控制器增益，而不是修改 PPO 或放宽验收阈值。
 
 ### contact
 

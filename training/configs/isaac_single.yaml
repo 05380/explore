@@ -54,6 +54,8 @@ control:
   command_frame: yaw_local
   max_speed_mps: 2.0
   max_yaw_rate_rps: 1.0
+  max_acceleration_mps2: 2.0
+  max_yaw_acceleration_rps2: 2.0
   random_command_interval_steps: 125
   random_command_overspeed_factor: 1.5
   reference_boundary_margin_m: 1.0
