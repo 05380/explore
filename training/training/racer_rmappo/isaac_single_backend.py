@@ -131,6 +131,9 @@ class IsaacSingleNavigationBackend:
             1, int(round(float(navigation["episode_seconds"]) * self.control_hz))
         )
         self.terminate_on_stall = bool(navigation.get("terminate_on_stall", True))
+        self.reset_pose_sync_control_steps = int(
+            navigation.get("reset_pose_sync_control_steps", 1)
+        )
         self.frame_stack = int(self.depth_cfg["frame_stack"])
         self.depth_width, self.depth_height = (
             int(value) for value in self.depth_cfg["resize"]
@@ -328,6 +331,9 @@ class IsaacSingleNavigationBackend:
 
     def reset(self) -> Tuple[Dict[str, Tensor], Tensor]:
         self.last_telemetry = self.probe.reset()
+        self.last_telemetry = self.probe.synchronize_pose_to_renderer(
+            self.reset_pose_sync_control_steps
+        )
         self.step_count = 0
         self.previous_action.zero_()
         self.position_history.clear()

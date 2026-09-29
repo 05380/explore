@@ -139,6 +139,10 @@ def validate_probe_config(cfg: Mapping[str, Any]) -> None:
     ):
         if float(navigation[key]) <= 0.0:
             raise ValueError(f"navigation_backend.{key} must be positive")
+    if int(navigation.get("reset_pose_sync_control_steps", 1)) < 1:
+        raise ValueError(
+            "navigation_backend.reset_pose_sync_control_steps must be at least one"
+        )
 
 
 def limit_velocity_command(
@@ -471,6 +475,47 @@ class IsaacSingleDroneProbe:
         self.last_world_velocity_command.zero_()
         self.last_yaw_rate_command.zero_()
         self._flush()
+
+    def synchronize_pose_to_renderer(self, control_steps: int = 1) -> Dict[str, Any]:
+        """Publish a tensor-written root pose to Fabric and settle motion.
+
+        Isaac Sim 2023.1 can expose a new root pose through PhysX tensor reads
+        while a fixed child camera still renders its previous transform. One
+        or more zero-command physics/control steps propagate the articulation
+        transform to Fabric. Velocities are cleared afterwards so an episode
+        starts from a settled state; the sub-millimetre position change is
+        retained and reported rather than hidden by a second teleport.
+        """
+        if int(control_steps) < 1:
+            raise ValueError("control_steps must be at least one")
+        latched_collision = False
+        latched_out_of_bounds = False
+        finite = True
+        max_contact_force = 0.0
+        telemetry = self.telemetry()
+        for _ in range(int(control_steps)):
+            telemetry, _ = self.step((0.0, 0.0, 0.0, 0.0))
+            latched_collision |= bool(telemetry["collision"])
+            latched_out_of_bounds |= bool(telemetry["out_of_bounds"])
+            finite &= bool(telemetry["finite"])
+            max_contact_force = max(
+                max_contact_force, float(telemetry["max_contact_force_n"])
+            )
+
+        self.drone.set_velocities(self.zero_velocities)
+        self.last_world_velocity_command.zero_()
+        self.last_yaw_rate_command.zero_()
+        self._flush()
+        settled = self.telemetry()
+        settled["collision"] = latched_collision or bool(settled["collision"])
+        settled["out_of_bounds"] = latched_out_of_bounds or bool(
+            settled["out_of_bounds"]
+        )
+        settled["finite"] = finite and bool(settled["finite"])
+        settled["max_contact_force_n"] = max(
+            max_contact_force, float(settled["max_contact_force_n"])
+        )
+        return settled
 
     def _state(self) -> Tensor:
         return self.drone.get_state(check_nan=False, env_frame=False)
@@ -951,9 +996,9 @@ class IsaacSingleDroneProbe:
         # frames does not fix this stale-transform failure mode.
         pose_sync_control_steps = int(probe_cfg.get("pose_sync_control_steps", 1))
         pose_sync_start = time.perf_counter()
-        synchronized_telemetry = self.telemetry()
-        for _ in range(pose_sync_control_steps):
-            synchronized_telemetry, _ = self.step((0.0, 0.0, 0.0, 0.0))
+        synchronized_telemetry = self.synchronize_pose_to_renderer(
+            pose_sync_control_steps
+        )
         pose_sync_wall_time = time.perf_counter() - pose_sync_start
         actual_yaw_rad = float(synchronized_telemetry["yaw_rad"])
         pose_sync_yaw_error = abs(

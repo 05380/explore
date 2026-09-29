@@ -20,6 +20,7 @@ from racer_rmappo.isaac_single_backend import (
     scale_navigation_action,
     world_to_yaw_local,
 )
+from racer_rmappo.rule_navigation import proportional_navigation_action
 
 
 def load_isaac_config():
@@ -50,6 +51,7 @@ class FakePhysicalProbe:
         self.velocity = torch.zeros(3)
         self.yaw = 0.0
         self.closed = False
+        self.pose_sync_calls = 0
 
     def _telemetry(self):
         half = 0.5 * self.yaw
@@ -91,6 +93,12 @@ class FakePhysicalProbe:
         )
         return self._telemetry(), command
 
+    def synchronize_pose_to_renderer(self, control_steps=1):
+        assert control_steps >= 1
+        self.pose_sync_calls += 1
+        self.velocity.zero_()
+        return self._telemetry()
+
     def close(self):
         self.closed = True
 
@@ -131,6 +139,12 @@ def test_backend_clearance_uses_validated_axial_depth_not_radial_annotator():
     assert backend.last_clearance_m.item() == pytest.approx(4.0)
 
 
+def test_backend_reset_synchronizes_fixed_camera_pose_once():
+    backend, probe = make_backend()
+    backend.reset()
+    assert probe.pose_sync_calls == 1
+
+
 def test_single_navigation_backend_matches_rmappo_contract():
     backend, _ = make_backend()
     validate_backend_shapes(backend)
@@ -155,6 +169,33 @@ def test_single_navigation_backend_matches_rmappo_contract():
     assert done.shape == (1,)
     assert torch.isfinite(reward).all()
     assert info["command_body"][0].item() == pytest.approx(0.5)
+
+
+def test_rule_controller_completes_episode_and_backend_auto_resets():
+    backend, probe = make_backend()
+    observation, _ = validate_backend_shapes(backend)
+    final_info = None
+    for _ in range(160):
+        action = proportional_navigation_action(
+            observation,
+            backend.target_cfg,
+            backend.action_limits,
+            position_gain=0.8,
+            yaw_gain=1.5,
+            max_cruise_speed_mps=0.8,
+        )
+        observation, _, _, done, info = backend.step(action)
+        if done.item():
+            final_info = info
+            break
+
+    assert final_info is not None
+    assert final_info["episode_success"].item() == 1.0
+    assert final_info["observation_completed"].item() == 1.0
+    assert backend.step_count == 0
+    assert backend.last_telemetry["position_m"] == pytest.approx(
+        probe.position.tolist(), abs=1e-6
+    )
 
 
 def test_navigation_reached_and_observation_completed_are_separate_events():

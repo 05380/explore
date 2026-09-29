@@ -120,7 +120,8 @@ P2_BACKEND_ENV_CLOSED
 
 ## 通过后的下一步
 
-1. 增加规则比例控制器，验证空旷目标确实能完成，并冻结一组回归轨迹。
+1. 按 [P2_SINGLE_NAV_LIFECYCLE.md](P2_SINGLE_NAV_LIFECYCLE.md) 运行规则比例控制器，
+   连续验证 20 个成功回合、自动 reset、新相机帧和 Direct GPU API 日志。
 2. 把目标移动到墙后，先用规则/人工动作验证存在可达绕行路径。
 3. 增加专用 Isaac 训练入口管理 `SimulationApp` 生命周期。
 4. 只训练导航头，在固定单墙场景做短连通性训练和固定场景过拟合。

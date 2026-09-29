@@ -25,7 +25,7 @@
 高保真 `isaac` backend 尚未完成。P1 单机物理探针已经验证 Hummingbird、Lee 控制器、2 m/s 指令限速、接触力、越界和 reset；具体命令与判据见 [P1_ISAAC_SINGLE_PROBE.md](P1_ISAAC_SINGLE_PROBE.md)。P2 的第一步又增加了固定机载 D455M 深度探针，验证 640×360 metric depth、0.9～20 m 范围、机体偏航跟随和 64×40 inverse-depth，见 [P2_D455M_CAMERA_PROBE.md](P2_D455M_CAMERA_PROBE.md)。这些探针仍没有完整 PPO 观测、目标/奖励和 episode 生命周期，不能当作 backend。旧 `env.py` 是单机 4 m LiDAR 任务，代码会在选择 `--backend isaac` 时明确报错，防止误训。Isaac backend 必须按
 `training/training/racer_rmappo/isaac_adapter.py` 返回深度、ego、已选 target、RACER candidates、decision mask、邻机状态和 centralized critic state。
 
-目前完整 `isaac` backend 和 ROS 在线推理节点仍未实现；现在除训练链路 smoke 外，可以运行 P1 单机物理探针、P2 D455M 相机探针，以及不更新 PPO 参数的单机固定目标 backend 合同探针，后者见 [P2_SINGLE_NAV_BACKEND.md](P2_SINGLE_NAV_BACKEND.md)。这些通过前不能开始有效的避障训练，更不能直接部署。
+目前完整 `isaac` backend 和 ROS 在线推理节点仍未实现；现在除训练链路 smoke 外，可以运行 P1 单机物理探针、P2 D455M 相机探针、不更新 PPO 参数的单机固定目标 backend 合同探针，以及连续成功回合/reset 压力探针，分别见 [P2_SINGLE_NAV_BACKEND.md](P2_SINGLE_NAV_BACKEND.md) 和 [P2_SINGLE_NAV_LIFECYCLE.md](P2_SINGLE_NAV_LIFECYCLE.md)。这些通过前不能开始有效的避障训练，更不能直接部署。
 
 ## 环境诊断
 

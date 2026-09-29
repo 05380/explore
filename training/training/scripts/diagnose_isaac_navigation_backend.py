@@ -101,8 +101,7 @@ def main() -> None:
         )
         probe = IsaacSingleDroneProbe(isaac_cfg, render=not headless)
         backend = IsaacSingleNavigationBackend(rmappo_cfg, isaac_cfg, probe)
-        validate_backend_shapes(backend)
-        observation, critic_state = backend.reset()
+        observation, critic_state = validate_backend_shapes(backend)
 
         action = torch.zeros(1, 1, 9, device=backend.device)
         action[..., 0] = float(args.forward_action)

@@ -113,6 +113,20 @@ navigation_backend:
   goal_tilt_tolerance_rad: 0.20
   episode_seconds: 30.0
   terminate_on_stall: true
+  # A tensor reset is visible to PhysX immediately, but the fixed child camera
+  # needs physics to advance before Fabric renders the reset pose.
+  reset_pose_sync_control_steps: 1
+  lifecycle_probe:
+    episodes: 20
+    max_steps_per_episode: 160
+    position_gain: 0.8
+    yaw_gain: 1.5
+    max_cruise_speed_mps: 0.8
+    reset_position_tolerance_m: 0.005
+    reset_speed_tolerance_mps: 0.001
+    reset_yaw_tolerance_rad: 0.01
+    reset_depth_mae_tolerance: 0.02
+    max_torch_cuda_memory_growth_mib: 256.0
 
 probe:
   seed: 0
