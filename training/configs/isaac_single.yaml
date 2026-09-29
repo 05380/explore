@@ -70,6 +70,47 @@ collision:
   intentional_contact_steps: 20
   clear_contact_steps: 30
 
+camera:
+  model: PXYZ-D455M
+  fixed_to_body: true
+  prim_name: D455M
+  width: 640
+  height: 360
+  actor_resize: [64, 40]
+  # Simulation intrinsics used elsewhere in this repository. Replace them
+  # with factory calibration before any real-camera deployment.
+  fx: 577.296
+  fy: 570.840
+  cx: 319.5
+  cy: 179.5
+  focal_length_mm: 24.0
+  min_depth_m: 0.9
+  max_depth_m: 20.0
+  # The sensor is a child of base_link: it cannot rotate independently. USD
+  # cameras look along -Z, so these body axes are converted to its local pose.
+  mount_position_body_m: [0.25, 0.0, 0.0]
+  forward_axis_body: [1.0, 0.0, 0.0]
+  up_axis_body: [0.0, 0.0, 1.0]
+  # Isaac 2023.1 may return stale images during the first frames after reset.
+  warmup_render_frames: 8
+  probe:
+    center_patch_px: 21
+    front_obstacle: contact_wall
+    yaw_test_rad: 1.5707963267948966
+    yaw_obstacle: wall_north
+
+# First backend stage: a rule-provided target before the front wall. This only
+# validates the observation/action/reward/episode contract. The following
+# single-wall avoidance curriculum will move the target behind the wall.
+navigation_backend:
+  fixed_target_position_m: [2.5, 0.0, 1.5]
+  fixed_target_yaw_rad: 0.0
+  goal_position_tolerance_m: 0.50
+  goal_yaw_tolerance_rad: 0.25
+  goal_tilt_tolerance_rad: 0.20
+  episode_seconds: 30.0
+  terminate_on_stall: true
+
 probe:
   seed: 0
   # Probe step counts below are control steps, not raw physics steps.
@@ -87,3 +128,5 @@ acceptance:
   reset_max_speed_mps: 0.001
   random_max_velocity_rmse_mps: 1.50
   random_max_actual_speed_mps: 3.00
+  camera_center_depth_abs_error_m: 0.30
+  camera_min_range_valid_fraction: 0.02

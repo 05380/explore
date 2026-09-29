@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import sys
 import traceback
@@ -29,7 +30,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument(
-        "--probe", choices=("all", "hover", "reset", "random", "contact"), default="all"
+        "--probe",
+        choices=("all", "hover", "reset", "random", "contact", "camera"),
+        default="all",
     )
     parser.add_argument("--steps", type=int, default=None, help="override hover/random steps")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -55,6 +58,7 @@ def main() -> None:
     headless = bool(app_cfg["headless"]) if args.headless is None else bool(args.headless)
 
     simulation_app = None
+    environment = None
     try:
         # SimulationApp must be created before constructing the environment,
         # because Isaac and OmniDrones modules are imported lazily there.
@@ -125,6 +129,16 @@ def main() -> None:
         print(f"P1_PROBE_REPORT={output_path}", flush=True)
         raise
     finally:
+        if environment is not None:
+            try:
+                environment.close()
+                print("P1_PROBE_ENV_CLOSED", flush=True)
+            except BaseException:
+                print("P1_PROBE_ENV_CLOSE_EXCEPTION", flush=True)
+                traceback.print_exc()
+            finally:
+                environment = None
+                gc.collect()
         if simulation_app is not None:
             simulation_app.close()
 

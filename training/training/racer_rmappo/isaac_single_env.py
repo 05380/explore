@@ -2,18 +2,27 @@
 
 This module deliberately does not import Omniverse modules at import time.
 The caller must create ``SimulationApp`` first, then construct
-``IsaacSingleDroneProbe``.  It is not yet the PPO backend: depth sensing,
-mapping, RACER candidates and rewards are introduced in later P1/P3 stages.
+``IsaacSingleDroneProbe``. It is not yet the PPO backend: mapping, RACER
+candidates and rewards are introduced in later P2/P3 stages.
 """
 
 from __future__ import annotations
 
+import gc
 import math
 import time
 from typing import Any, Dict, Mapping, Sequence
 
 import torch
 from torch import Tensor
+
+from .d455m_sensor import (
+    FixedBodyD455MSensor,
+    depth_to_normalized_inverse,
+    resize_inverse_depth_for_actor,
+    summarize_depth,
+    validate_d455m_config,
+)
 
 
 def _require_vector(
@@ -37,6 +46,8 @@ def validate_probe_config(cfg: Mapping[str, Any]) -> None:
         "drone",
         "control",
         "collision",
+        "camera",
+        "navigation_backend",
         "probe",
         "acceptance",
     }
@@ -106,6 +117,21 @@ def validate_probe_config(cfg: Mapping[str, Any]) -> None:
         raise ValueError("control.max_yaw_acceleration_rps2 must be positive")
     if int(control["random_command_interval_steps"]) < 1:
         raise ValueError("random_command_interval_steps must be at least one")
+
+    validate_d455m_config(cfg["camera"])
+
+    navigation = cfg["navigation_backend"]
+    target = _require_vector(navigation, "fixed_target_position_m", 3)
+    if any(not lo < value < hi for value, lo, hi in zip(target, lower, upper)):
+        raise ValueError("navigation_backend fixed target must be inside flight bounds")
+    for key in (
+        "goal_position_tolerance_m",
+        "goal_yaw_tolerance_rad",
+        "goal_tilt_tolerance_rad",
+        "episode_seconds",
+    ):
+        if float(navigation[key]) <= 0.0:
+            raise ValueError(f"navigation_backend.{key} must be positive")
 
 
 def limit_velocity_command(
@@ -283,10 +309,30 @@ class IsaacSingleDroneProbe:
         self.spawn_orientation = torch.tensor(
             [1.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=self.device
         ).reshape(1, 1, 4)
-        self.drone.spawn(translations=self.spawn_position.reshape(-1, 3))
+        self.drone_root_path = f"/World/envs/env_0/{self.drone.name}_0"
+        self.drone.spawn(
+            translations=self.spawn_position.reshape(-1, 3),
+            prim_paths=[self.drone_root_path],
+        )
+        self.depth_camera = FixedBodyD455MSensor(
+            cfg["camera"],
+            parent_prim_path=f"{self.drone_root_path}/base_link",
+            simulation_context=self.sim,
+        )
+        self._closed = False
 
-        self.sim.reset()
-        self.drone.initialize(track_contact_forces=True)
+        try:
+            self.sim.reset()
+            self.drone.initialize(track_contact_forces=True)
+            self.depth_camera.initialize()
+        except BaseException:
+            # Constructor assignment in the caller has not completed yet, so
+            # it cannot call close() for us when camera/PhysX setup fails.
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise
         self.controller = LeePositionController(
             g=9.81, uav_params=self.drone.params
         ).to(self.device)
@@ -320,6 +366,51 @@ class IsaacSingleDroneProbe:
         self.last_world_velocity_command = torch.zeros(3, device=self.device)
         self.last_yaw_rate_command = torch.zeros(1, device=self.device)
         self.reset()
+
+    def close(self) -> None:
+        """Release PhysX views before the owning SimulationApp shuts down."""
+        if self._closed:
+            return
+        self._closed = True
+
+        sim = self.sim
+        drone = self.drone
+        depth_camera = self.depth_camera
+        camera_close_error: Exception | None = None
+        if depth_camera is not None:
+            try:
+                depth_camera.close()
+            except Exception as error:
+                # Continue releasing PhysX/SimulationContext resources. The
+                # caller still receives the renderer cleanup error afterwards.
+                camera_close_error = error
+        self.depth_camera = None
+        try:
+            # OmniDrones keeps a process-wide strong reference to every robot.
+            # Remove it before Kit unloads the PhysX plugins.
+            from omni_drones.robots import RobotBase
+
+            RobotBase._robots.pop(drone.name, None)
+        except (AttributeError, ImportError):
+            pass
+
+        self.controller = None
+        self.drone = None
+        del drone
+        gc.collect()
+        if sim is not None:
+            try:
+                sim.stop()
+            finally:
+                clear_callbacks = getattr(sim, "clear_all_callbacks", None)
+                if callable(clear_callbacks):
+                    clear_callbacks()
+                clear_instance = getattr(sim, "clear_instance", None)
+                if callable(clear_instance):
+                    clear_instance()
+        self.sim = None
+        if camera_close_error is not None:
+            raise camera_close_error
 
     def _flush(self) -> None:
         physics_view = getattr(self.sim, "_physics_sim_view", None)
@@ -355,6 +446,23 @@ class IsaacSingleDroneProbe:
                 raise ValueError("test velocity must have three or six values")
         self.drone.set_velocities(velocities)
         self.target_position.copy_(position.reshape(1, 3))
+        self._flush()
+
+    def set_test_pose(self, position: Tensor, yaw_rad: float) -> None:
+        """Teleport the drone while preserving the fixed camera/body transform."""
+        half_yaw = 0.5 * float(yaw_rad)
+        orientation = torch.tensor(
+            [math.cos(half_yaw), 0.0, 0.0, math.sin(half_yaw)],
+            dtype=torch.float32,
+            device=self.device,
+        ).reshape(1, 1, 4)
+        position = position.to(device=self.device, dtype=torch.float32).reshape(1, 1, 3)
+        self.drone.set_world_poses(position, orientation)
+        self.drone.set_velocities(self.zero_velocities)
+        self.target_position.copy_(position.reshape(1, 3))
+        self.target_yaw.fill_(float(yaw_rad))
+        self.last_world_velocity_command.zero_()
+        self.last_yaw_rate_command.zero_()
         self._flush()
 
     def _state(self) -> Tensor:
@@ -398,11 +506,23 @@ class IsaacSingleDroneProbe:
         desired_yaw_rate = command_limited[3].reshape(1)
         command_world_velocity = self.last_world_velocity_command.clone()
         yaw_rate_command = self.last_yaw_rate_command.clone()
+        max_contact_force = torch.zeros((), device=self.device)
+        collision_any = torch.zeros((), dtype=torch.bool, device=self.device)
+        out_of_bounds_any = torch.zeros((), dtype=torch.bool, device=self.device)
+        finite_all = torch.ones((), dtype=torch.bool, device=self.device)
+        collision_physics_substeps = torch.zeros(
+            (), dtype=torch.long, device=self.device
+        )
+        out_of_bounds_physics_substeps = torch.zeros(
+            (), dtype=torch.long, device=self.device
+        )
+        root_state = self._state()[..., :13].reshape(-1, 13)
 
         # Hold one policy action for a fixed number of physics steps. The Lee
         # controller and reference filters still update at the physics rate.
+        # Safety events are latched across all substeps so a transient contact
+        # cannot disappear before the policy receives the next observation.
         for physics_step in range(self.physics_steps_per_action):
-            root_state = self._state()[..., :13].reshape(-1, 13)
             current_yaw = quaternion_yaw_wxyz(root_state[..., 3:7])
             desired_world_velocity = yaw_local_velocity_to_world(
                 command_limited[:3].reshape(1, 3), current_yaw
@@ -453,10 +573,48 @@ class IsaacSingleDroneProbe:
             )
             self.sim.step(render=render_this_step)
 
+            substep_state = self._state()
+            substep_position = substep_state[..., :3].reshape(-1, 3)[0]
+            substep_contact_forces = (
+                self.drone.base_link.get_net_contact_forces(clone=True)
+            )
+            substep_max_contact = substep_contact_forces.norm(dim=-1).max()
+            substep_collision = substep_max_contact > self.contact_threshold
+            substep_out_of_bounds = torch.logical_or(
+                substep_position < self.bounds_min,
+                substep_position > self.bounds_max,
+            ).any()
+            substep_finite = torch.isfinite(substep_state).all() & torch.isfinite(
+                substep_contact_forces
+            ).all()
+
+            max_contact_force = torch.maximum(
+                max_contact_force, substep_max_contact
+            )
+            collision_any |= substep_collision
+            out_of_bounds_any |= substep_out_of_bounds
+            finite_all &= substep_finite
+            collision_physics_substeps += substep_collision.to(torch.long)
+            out_of_bounds_physics_substeps += substep_out_of_bounds.to(
+                torch.long
+            )
+            root_state = substep_state[..., :13].reshape(-1, 13)
+
         applied_command = torch.cat(
             (command_world_velocity, yaw_rate_command), dim=0
         )
-        return self.telemetry(), applied_command.detach().clone()
+        telemetry = self.telemetry()
+        telemetry["max_contact_force_n"] = float(max_contact_force.item())
+        telemetry["collision"] = bool(collision_any.item())
+        telemetry["out_of_bounds"] = bool(out_of_bounds_any.item())
+        telemetry["finite"] = bool(finite_all.item())
+        telemetry["collision_physics_substeps"] = int(
+            collision_physics_substeps.item()
+        )
+        telemetry["out_of_bounds_physics_substeps"] = int(
+            out_of_bounds_physics_substeps.item()
+        )
+        return telemetry, applied_command.detach().clone()
 
     def _progress(self, name: str, step: int, steps: int, telemetry: Mapping[str, Any]) -> None:
         interval = max(int(self.cfg["probe"]["print_interval_steps"]), 1)
@@ -477,7 +635,9 @@ class IsaacSingleDroneProbe:
         min_up_z = 1.0
         min_altitude = math.inf
         collision_steps = 0
+        collision_physics_substeps = 0
         out_of_bounds_steps = 0
+        out_of_bounds_physics_substeps = 0
         finite = True
         last = self.telemetry()
         wall_start = time.perf_counter()
@@ -493,7 +653,13 @@ class IsaacSingleDroneProbe:
             min_up_z = min(min_up_z, float(last["up_z"]))
             min_altitude = min(min_altitude, float(last["position_m"][2]))
             collision_steps += int(last["collision"])
+            collision_physics_substeps += int(
+                last["collision_physics_substeps"]
+            )
             out_of_bounds_steps += int(last["out_of_bounds"])
+            out_of_bounds_physics_substeps += int(
+                last["out_of_bounds_physics_substeps"]
+            )
             finite = finite and bool(last["finite"])
             self._progress("hover", step, steps, last)
         wall_time = max(time.perf_counter() - wall_start, 1e-9)
@@ -530,7 +696,9 @@ class IsaacSingleDroneProbe:
             "min_altitude_m": min_altitude,
             "min_up_z": min_up_z,
             "collision_steps": collision_steps,
+            "collision_physics_substeps": collision_physics_substeps,
             "out_of_bounds_steps": out_of_bounds_steps,
+            "out_of_bounds_physics_substeps": out_of_bounds_physics_substeps,
             "finite": finite,
             "final_telemetry": last,
         }
@@ -589,7 +757,9 @@ class IsaacSingleDroneProbe:
         actual_overspeed_steps = 0
         squared_tracking_error = 0.0
         collision_steps = 0
+        collision_physics_substeps = 0
         out_of_bounds_steps = 0
+        out_of_bounds_physics_substeps = 0
         finite = True
         last = self.telemetry()
         wall_start = time.perf_counter()
@@ -613,7 +783,13 @@ class IsaacSingleDroneProbe:
                 (actual_velocity - self.last_world_velocity_command).square().sum().item()
             )
             collision_steps += int(last["collision"])
+            collision_physics_substeps += int(
+                last["collision_physics_substeps"]
+            )
             out_of_bounds_steps += int(last["out_of_bounds"])
+            out_of_bounds_physics_substeps += int(
+                last["out_of_bounds_physics_substeps"]
+            )
             finite = finite and bool(last["finite"])
             self._progress("random", step, steps, last)
         wall_time = max(time.perf_counter() - wall_start, 1e-9)
@@ -654,7 +830,9 @@ class IsaacSingleDroneProbe:
             "actual_overspeed_fraction": actual_overspeed_steps / max(steps, 1),
             "velocity_tracking_rmse_mps": velocity_rmse,
             "collision_steps": collision_steps,
+            "collision_physics_substeps": collision_physics_substeps,
             "out_of_bounds_steps": out_of_bounds_steps,
+            "out_of_bounds_physics_substeps": out_of_bounds_physics_substeps,
             "finite": finite,
             "limiter_ok": limiter_ok,
             "final_telemetry": last,
@@ -673,11 +851,15 @@ class IsaacSingleDroneProbe:
         steps = int(self.cfg["collision"]["intentional_contact_steps"])
         max_force = 0.0
         collision_steps = 0
+        collision_physics_substeps = 0
         finite = True
         for _ in range(steps):
             telemetry, _ = self.step((0.0, 0.0, 0.0, 0.0))
             max_force = max(max_force, float(telemetry["max_contact_force_n"]))
             collision_steps += int(telemetry["collision"])
+            collision_physics_substeps += int(
+                telemetry["collision_physics_substeps"]
+            )
             finite = finite and bool(telemetry["finite"])
 
         self.reset()
@@ -695,12 +877,158 @@ class IsaacSingleDroneProbe:
             "obstacle": str(contact_obstacle["name"]),
             "intentional_contact_steps": steps,
             "collision_steps": collision_steps,
+            "collision_physics_substeps": collision_physics_substeps,
             "max_contact_force_n": max_force,
             "contact_threshold_n": self.contact_threshold,
             "final_clear_force_n": final_clear_force,
             "detected": detected,
             "cleared_after_reset": cleared,
             "finite": finite,
+        }
+
+    def _obstacle_by_name(self, name: str) -> Mapping[str, Any]:
+        matches = [item for item in self.obstacles if str(item["name"]) == name]
+        if len(matches) != 1:
+            raise ValueError(f"camera probe obstacle {name!r} was not found exactly once")
+        return matches[0]
+
+    def _expected_camera_wall_depth(
+        self, obstacle: Mapping[str, Any], axis: int
+    ) -> float:
+        camera_cfg = self.cfg["camera"]
+        obstacle_near_face = float(obstacle["position_m"][axis]) - 0.5 * float(
+            obstacle["size_m"][axis]
+        )
+        camera_forward_offset = float(camera_cfg["mount_position_body_m"][0])
+        spawn_axis = float(self.spawn_position.reshape(3)[axis].item())
+        return obstacle_near_face - spawn_axis - camera_forward_offset
+
+    def run_camera(self) -> Dict[str, Any]:
+        """Validate metric depth, 20 m clipping and fixed-body yaw behavior."""
+        camera_cfg = self.cfg["camera"]
+        probe_cfg = camera_cfg["probe"]
+        acceptance = self.cfg["acceptance"]
+        self.reset()
+
+        front_obstacle = self._obstacle_by_name(str(probe_cfg["front_obstacle"]))
+        front_capture_start = time.perf_counter()
+        front_depth = self.depth_camera.capture()
+        front_capture_wall_time = time.perf_counter() - front_capture_start
+        front_plane = summarize_depth(
+            front_depth["distance_to_image_plane"],
+            float(camera_cfg["min_depth_m"]),
+            float(camera_cfg["max_depth_m"]),
+            int(probe_cfg["center_patch_px"]),
+        )
+        front_radial = summarize_depth(
+            front_depth["distance_to_camera"],
+            float(camera_cfg["min_depth_m"]),
+            float(camera_cfg["max_depth_m"]),
+            int(probe_cfg["center_patch_px"]),
+        )
+        front_expected = self._expected_camera_wall_depth(front_obstacle, axis=0)
+
+        yaw_rad = float(probe_cfg["yaw_test_rad"])
+        self.set_test_pose(self.spawn_position.reshape(3), yaw_rad)
+        yaw_obstacle = self._obstacle_by_name(str(probe_cfg["yaw_obstacle"]))
+        yaw_capture_start = time.perf_counter()
+        yaw_depth = self.depth_camera.capture()
+        yaw_capture_wall_time = time.perf_counter() - yaw_capture_start
+        yaw_plane = summarize_depth(
+            yaw_depth["distance_to_image_plane"],
+            float(camera_cfg["min_depth_m"]),
+            float(camera_cfg["max_depth_m"]),
+            int(probe_cfg["center_patch_px"]),
+        )
+        yaw_expected = self._expected_camera_wall_depth(yaw_obstacle, axis=1)
+
+        normalized, valid = depth_to_normalized_inverse(
+            front_depth["distance_to_image_plane"],
+            float(camera_cfg["min_depth_m"]),
+            float(camera_cfg["max_depth_m"]),
+        )
+        actor_width, actor_height = (int(v) for v in camera_cfg["actor_resize"])
+        actor_depth = resize_inverse_depth_for_actor(
+            normalized,
+            output_width=actor_width,
+            output_height=actor_height,
+        )
+
+        tolerance = float(acceptance["camera_center_depth_abs_error_m"])
+        minimum_valid = float(acceptance["camera_min_range_valid_fraction"])
+        front_median = front_plane["center_median_m"]
+        yaw_median = yaw_plane["center_median_m"]
+        front_error_value = (
+            abs(float(front_median) - front_expected)
+            if front_median is not None
+            else None
+        )
+        yaw_error_value = (
+            abs(float(yaw_median) - yaw_expected)
+            if yaw_median is not None
+            else None
+        )
+        front_error = front_error_value if front_error_value is not None else math.inf
+        yaw_error = yaw_error_value if yaw_error_value is not None else math.inf
+        correct_shape = front_plane["shape"] == [
+            int(camera_cfg["height"]),
+            int(camera_cfg["width"]),
+        ]
+        depth_within_clipping_range = all(
+            summary["valid_max_m"] is None
+            or float(summary["valid_max_m"])
+            <= float(camera_cfg["max_depth_m"]) + 1e-3
+            for summary in (front_plane, front_radial, yaw_plane)
+        )
+        passed = (
+            correct_shape
+            and front_plane["finite"]
+            and front_radial["finite"]
+            and yaw_plane["finite"]
+            and float(front_plane["range_valid_fraction"]) >= minimum_valid
+            and float(yaw_plane["range_valid_fraction"]) >= minimum_valid
+            and front_error <= tolerance
+            and yaw_error <= tolerance
+            and depth_within_clipping_range
+            and tuple(actor_depth.shape) == (actor_height, actor_width)
+            and bool(torch.isfinite(actor_depth).all().item())
+            and float(actor_depth.min().item()) >= 0.0
+            and float(actor_depth.max().item()) <= 1.0
+        )
+        self.reset()
+        render_frames_per_capture = int(camera_cfg["warmup_render_frames"])
+        total_capture_wall_time = front_capture_wall_time + yaw_capture_wall_time
+        return {
+            "passed": passed,
+            "camera_prim_path": self.depth_camera.prim_path,
+            "fixed_to_body": bool(camera_cfg["fixed_to_body"]),
+            "resolution": [int(camera_cfg["width"]), int(camera_cfg["height"])],
+            "actor_depth_shape": list(actor_depth.shape),
+            "metric_depth_valid_pixels": int(valid.sum().item()),
+            "inverse_depth_min": float(actor_depth.min().item()),
+            "inverse_depth_max": float(actor_depth.max().item()),
+            "depth_within_clipping_range": depth_within_clipping_range,
+            "render_frames_per_capture": render_frames_per_capture,
+            "capture_wall_time_s": total_capture_wall_time,
+            "render_frames_per_second": (
+                2 * render_frames_per_capture / max(total_capture_wall_time, 1e-9)
+            ),
+            "front": {
+                "obstacle": str(front_obstacle["name"]),
+                "expected_center_depth_m": front_expected,
+                "center_depth_abs_error_m": front_error_value,
+                "capture_wall_time_s": front_capture_wall_time,
+                "distance_to_image_plane": front_plane,
+                "distance_to_camera": front_radial,
+            },
+            "yaw_follow": {
+                "yaw_test_rad": yaw_rad,
+                "obstacle": str(yaw_obstacle["name"]),
+                "expected_center_depth_m": yaw_expected,
+                "center_depth_abs_error_m": yaw_error_value,
+                "capture_wall_time_s": yaw_capture_wall_time,
+                "distance_to_image_plane": yaw_plane,
+            },
         }
 
     def run(self, probe: str, steps: int | None = None) -> Dict[str, Any]:
@@ -712,12 +1040,15 @@ class IsaacSingleDroneProbe:
             probes = {"random": self.run_random(steps)}
         elif probe == "contact":
             probes = {"contact": self.run_contact()}
+        elif probe == "camera":
+            probes = {"camera": self.run_camera()}
         elif probe == "all":
             probes = {
                 "hover": self.run_hover(steps),
                 "reset": self.run_reset(),
                 "random": self.run_random(steps),
                 "contact": self.run_contact(),
+                "camera": self.run_camera(),
             }
         else:
             raise ValueError(f"unknown probe: {probe}")

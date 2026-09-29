@@ -43,8 +43,10 @@ def build_backend(cfg: Mapping[str, object], device: torch.device):
         return backend
     if backend_name == "isaac":
         raise RuntimeError(
-            "The high-fidelity Isaac backend is not wired yet. Do not fall back to the old single-drone "
-            "LiDAR env.py: implement MultiUAVBackend in racer_rmappo/isaac_adapter.py first."
+            "Isaac training is intentionally gated. The one-drone fixed-target contract exists in "
+            "racer_rmappo/isaac_single_backend.py, but train/eval do not yet own SimulationApp lifecycle. "
+            "Run diagnose_isaac_navigation_backend.py and pass its acceptance checks first; never fall "
+            "back to the old single-drone LiDAR env.py."
         )
     raise ValueError(f"unknown training backend: {backend_name}")
 

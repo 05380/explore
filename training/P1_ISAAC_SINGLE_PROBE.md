@@ -1,6 +1,6 @@
 # P1 第一阶段：单机 Isaac 物理探针
 
-这一阶段只验证 Isaac Sim、OmniDrones、Hummingbird、Lee 控制器、碰撞检测和 reset 是否形成可靠闭环。它不读取深度图，不构造体素地图，不运行 PPO，也不代表已经具备避障能力。
+这一阶段只验证 Isaac Sim、OmniDrones、Hummingbird、Lee 控制器、碰撞检测和 reset 是否形成可靠闭环。P1 判据本身不读取深度图、不构造体素地图、不运行 PPO，也不代表已经具备避障能力。当前代码后来加入了 P2 相机探针，因此现在的 `--probe all` 会额外运行相机项。
 
 ## 已实现内容
 
@@ -19,10 +19,12 @@
 
 ```text
 training/configs/isaac_single.yaml
+training/training/racer_rmappo/d455m_sensor.py
 training/training/racer_rmappo/isaac_single_env.py
 training/training/scripts/diagnose_isaac_backend.py
 training/training/tests/test_isaac_single_probe.py
 training/P1_ISAAC_SINGLE_PROBE.md
+training/P2_D455M_CAMERA_PROBE.md
 training/README_RMAPPO.md
 ISAAC_RMAPPO_实施计划.md
 ```
@@ -115,13 +117,18 @@ python -u training/scripts/diagnose_isaac_backend.py --probe contact --headless
 - `cleared_after_reset` 必须为 true，证明碰撞状态不会污染下一回合。
 - `max_contact_force_n` 应高于 `contact_threshold_n`。
 
+碰撞、越界和非有限状态会在一个 20 Hz 控制周期包含的全部 6 个物理子步中锁存；即使接触只持续一个 120 Hz 子步，也必须在该控制步报告。`collision_physics_substeps` 可用于判断一次控制周期内接触持续了几个物理步。
+
+脚本退出时应先打印 `P1_PROBE_ENV_CLOSED`，再关闭 `SimulationApp`。环境清理会先停止物理、释放 OmniDrones/PhysX 视图并清除 `SimulationContext` 回调与单例，避免仍存活的 Python 对象在 Kit 插件卸载期间访问失效资源。
+
 若接触力始终为 0，检查 `drone.initialize(track_contact_forces=True)`、障碍的 collision schema，以及无人机 base link 的 contact view。若无碰撞时偶发误报，先观察静止噪声分布，再小幅提高 `contact_force_threshold_n`，并保留安全余量。
 
 ## 通过后的后续开发
 
-1. 给机身 `base_link` 挂载固定 D455M 相机，先读取原始 `distance_to_camera`。
-2. 验证相机位姿随无人机 yaw 转动、相机本身没有独立转动自由度。
-3. 明确深度语义并裁剪到 0.3～20 m，记录无效像素比例、帧率和 GPU 显存。
-4. 反投影深度视锥并维护 0.5 m 本机占据/已观测体素。
-5. 用真实深度、ego、固定局部目标构造单机版 `MultiUAVBackend`；此时才打开 `--backend isaac`。
-6. 先做固定目标和固定障碍的 4096-step 连通性训练，再做固定场景过拟合；成功后才随机化建筑和树木。
+固定 D455M 挂载、深度语义、20 m 截断、机体偏航跟随和 64×40 actor 预处理
+已经进入 P2 相机探针，运行方式见 [P2_D455M_CAMERA_PROBE.md](P2_D455M_CAMERA_PROBE.md)。
+该探针通过后的顺序是：
+
+1. 反投影深度视锥并维护 0.5 m 本机占据/已观测体素。
+2. 用真实深度、ego、固定局部目标构造单机版 `MultiUAVBackend`；此时才打开 `--backend isaac`。
+3. 先做固定目标和固定障碍的 4096-step 连通性训练，再做固定场景过拟合；成功后才随机化建筑和树木。
