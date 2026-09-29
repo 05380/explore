@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
-import wandb
 import numpy as np
 from typing import Iterable, Union
 from tensordict.tensordict import TensorDict
-from omni_drones.utils.torchrl import RenderCallback
 from torchrl.envs.utils import ExplorationType, set_exploration_type
+
+# Backward-compatible exports for code that historically imported these
+# helpers from utils. New code should import geometry_utils directly.
+from geometry_utils import vec_to_new_frame, vec_to_world
 
 class ValueNorm(nn.Module):
     def __init__(
@@ -389,6 +391,16 @@ def evaluate(
     prefix: str="eval",
     eval_task_mode: str=None,
 ):
+    try:
+        import wandb
+        from omni_drones.utils.torchrl import RenderCallback
+    except ImportError as exc:
+        raise RuntimeError(
+            "Video evaluation requires wandb and the OmniDrones rendering "
+            "helpers. Install the evaluation dependencies and initialize "
+            "Isaac Sim before calling evaluate()."
+        ) from exc
+
     base_env = getattr(env, "base_env", env)
     prev_task_mode = getattr(base_env, "eval_task_mode", None)
     prev_training = getattr(base_env, "training", None)
@@ -449,49 +461,6 @@ def evaluate(
     env.reset()
 
     return info
-
-
-def vec_to_new_frame(vec, goal_direction):
-    if (len(vec.size()) == 1):
-        vec = vec.unsqueeze(0)
-    # print("vec: ", vec.shape)
-
-    # goal direction x
-    goal_direction_x = goal_direction / goal_direction.norm(dim=-1, keepdim=True)
-    z_direction = torch.tensor([0, 0, 1.], device=vec.device)
-    
-    # goal direction y
-    goal_direction_y = torch.cross(z_direction.expand_as(goal_direction_x), goal_direction_x)
-    goal_direction_y /= goal_direction_y.norm(dim=-1, keepdim=True)
-    
-    # goal direction z
-    goal_direction_z = torch.cross(goal_direction_x, goal_direction_y)
-    goal_direction_z /= goal_direction_z.norm(dim=-1, keepdim=True)
-
-    n = vec.size(0)
-    if len(vec.size()) == 3:
-        vec_x_new = torch.bmm(vec.view(n, vec.shape[1], 3), goal_direction_x.view(n, 3, 1)) 
-        vec_y_new = torch.bmm(vec.view(n, vec.shape[1], 3), goal_direction_y.view(n, 3, 1))
-        vec_z_new = torch.bmm(vec.view(n, vec.shape[1], 3), goal_direction_z.view(n, 3, 1))
-    else:
-        vec_x_new = torch.bmm(vec.view(n, 1, 3), goal_direction_x.view(n, 3, 1))
-        vec_y_new = torch.bmm(vec.view(n, 1, 3), goal_direction_y.view(n, 3, 1))
-        vec_z_new = torch.bmm(vec.view(n, 1, 3), goal_direction_z.view(n, 3, 1))
-
-    vec_new = torch.cat((vec_x_new, vec_y_new, vec_z_new), dim=-1)
-
-    return vec_new
-
-
-def vec_to_world(vec, goal_direction):
-    world_dir = torch.tensor([1., 0, 0], device=vec.device).expand_as(goal_direction)
-    
-    # directional vector of world coordinate expressed in the local frame
-    world_frame_new = vec_to_new_frame(world_dir, goal_direction)
-
-    # convert the velocity in the local target coordinate to the world coodirnate
-    world_frame_vel = vec_to_new_frame(vec, world_frame_new)
-    return world_frame_vel
 
 
 def construct_input(start, end):

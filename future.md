@@ -1,3 +1,5 @@
+> 当前实施路线（2026-09-28）：训练、评估与最终仿真均在 Isaac Sim 内完成；RACER 提供规则算法参考，ROS 不再是前置步骤。详细阶段、代码模块、参数、测试与验收见 [Isaac Sim 协同探索实施计划](ISAAC_RMAPPO_实施计划.md)。本文件保留历史讨论，涉及 ROS 优先顺序的旧内容已归档。
+
 1、替换transformer
 
 可以引入 Transformer。结合当前代码，我最建议先采用：
@@ -135,4 +137,183 @@ python training/scripts/eval_rmappo.py \
 
 
 
-2、
+2、后续计划（当前路线）
+
+执行依据：[ISAAC_RMAPPO_实施计划.md](ISAAC_RMAPPO_实施计划.md)。
+
+1. 固定 Isaac/OmniDrones 运行环境与训练接口，不依赖 ROS。
+2. 实现单机 Isaac backend：真实动力学、固定深度相机、速度飞控、碰撞与 reset。
+3. 完成单目标避障与观测完成训练，再接入 0.5 m 深度占据建图。
+4. 实现 RACER 启发的 frontier、区域任务与候选观测点；联合训练选点和导航。
+5. 从两机开始接入独立地图、仿真 map chunks 通信与两两协商。
+6. 逐步扩展至 4/8/16 机和 150×150×5 m，在 Isaac 内完成冻结模型评估。
+7. 基线稳定后再比较 Transformer；ROS/真实 UDP/真机作为可选未来工作。
+
+下方保留旧讨论供追溯，其中 ROS 验证前置、ROS actor 必须实现等安排不再适用于当前目标；完成度请以新计划的代码核对表为准。
+
+<details>
+<summary>历史方案：ROS 集成路线（已被 Isaac 内闭环计划替代）</summary>
+
+你的项目目标是：
+
+让 16 架无人机在 150 m × 150 m × 5 m 的未知环境中，使用固定机载 D455M 深度相机完成去中心化协同探索。
+
+整体分工是：
+
+```text
+D455M 深度图
+    ↓
+每机 0.5 m 占据地图 + 在线 map chunks 融合
+    ↓
+RACER：frontier、HGrid 分区、两两协商、任务分配
+    ↓
+每机最多 16 个候选观测点
+    ↓
+共享 RMAPPO：
+  1. 选择具体候选观测点
+  2. 输出 vx、vy、vz、yaw_rate
+  3. 学习避障并到达观测点
+    ↓
+位置和相机朝向正确、融合新深度帧
+    ↓
+继续生成新任务，直到可探索区域覆盖完成
+```
+
+RACER 保留高层任务分配和地图融合；RMAPPO 取代原来的局部观测点决策及 A*/B-spline 低层导航。训练时使用集中式 critic，部署时每架无人机只运行共享 actor。系统边界已经写在 [改造说明](/Users/yoloflps/Desktop/PROJECT/explore/RACER-main/RACER_RMAPPO_D455M_改造说明.md:5)。
+
+当前项目已经有：
+
+- RACER 候选任务消息与 PPO 选择接口；
+- 占据地图、0.5 m 膨胀层和在线 chunks 融合；
+- 速度动作桥接与 2 m/s 限幅；
+- 共享 GRU actor、集中式 critic 和 RMAPPO 更新；
+- 奖励、回合指标和 smoke 环境；
+- 训练模型导出框架。
+
+目前真正缺失的是：
+
+- 高保真多机 Isaac backend；
+- ROS 在线 actor 推理节点；
+- Ubuntu/ROS 上的实际编译和 topic 联调；
+- 最终训练模型。
+
+证据很直接：[isaac_adapter.py](/Users/yoloflps/Desktop/PROJECT/explore/RACER-main/training/training/racer_rmappo/isaac_adapter.py:41) 目前只有接口定义，而 [trainer.py](/Users/yoloflps/Desktop/PROJECT/explore/RACER-main/training/training/racer_rmappo/trainer.py:38) 在选择 `isaac` 时会主动报错。`future.md` 当前还是空文件。
+
+你下一步应按下面顺序推进。
+
+1. 先在 Ubuntu ROS 机器验证已有代码
+
+当前工作区有大量未提交修改，建议先保存一次 Git 快照。然后在 ROS 工作站执行：
+
+```bash
+cd /path/to/catkin_ws
+catkin_make --pkg plan_env active_perception exploration_manager
+source devel/setup.bash
+```
+
+先验证原 RACER，再验证 RL launch：
+
+```bash
+roslaunch exploration_manager single_drone_rl_d455m.xml \
+  drone_num:=1 simulation:=true
+```
+
+需要确认：
+
+- D455M 深度 topic 有数据；
+- 0.5 m 地图正常更新；
+- `RLTask` 能产生候选点；
+- 没有 actor 时无人机保持悬停；
+- 测试 selector 返回候选后，`RLTarget.active=true`；
+- 速度桥的坐标转换、限幅和超时正常。
+
+这是当前代码能否继续扩展的基础，验收顺序也记录在 [改造说明](/Users/yoloflps/Desktop/PROJECT/explore/RACER-main/RACER_RMAPPO_D455M_改造说明.md:305)。
+
+2. 实现第一版单机 Isaac backend
+
+这是最重要的下一个编码任务。先做 `single_agent_sparse_static`，不要直接上 16 机。
+
+
+
+- 30 m × 30 m × 5 m；
+- 一架现有无人机模型；
+- 固定机载 D455M 深度相机；
+- 直墙、L 墙、U 墙、圆柱树干；
+- 固定或随机局部目标；
+- 输出 `[vx, vy, vz, yaw_rate]`；
+- 碰撞、越界、目标进展和停滞奖励；
+- 完整 reset；
+- 满足现有 `MultiUAVBackend` 张量合同。
+
+该阶段可以把候选集合设成“一个真实目标 + 15 个 padding”，`decision_mask` 只在生成新目标时触发。先让 PPO学会看到深度后绕障到达目标。
+
+第一阶段通过标准：
+
+- 固定障碍场景能够过拟合；
+- 无 NaN/Inf；
+- 深度随机体 yaw 正确转动；
+- 速度模长不超过 2 m/s；
+- 碰撞率开始下降；
+- 目标到达率明显上升；
+- reset 后地图、目标、无人机和 GRU 状态全部清空。
+
+3. 再加入 0.5 m 体素观测与探索奖励
+
+单机避障跑通后，再实现：
+
+- 深度视锥反投影；
+- 本机新观测体素；
+- 团队唯一体素；
+- 重复观测；
+- 可观测、可到达体素 mask；
+- 50%、75%、90%、98% 覆盖率事件。
+
+这里 actor 只能看到深度和本机可用信息；仿真真值只能用于奖励、碰撞检测和 coverage 分母。
+
+4. 实现 ROS 在线 actor 节点
+
+这个节点需要：
+
+- 加载导出的 TorchScript；
+- 订阅本机深度、里程计、`RLTask`、`RLTarget` 和邻机状态；
+- 严格复用训练期 inverse-depth、64×40 resize 和三帧堆叠；
+- 保存每架无人机的 GRU hidden state；
+- 收到新 `RLTask` 时发布一次 `RLViewpointSelection`；
+- 按 20 Hz 发布 `cmd_vel_body`；
+- task 失效、模型异常或输入超时时清零速度并重置 hidden state。
+
+即使没有训练好的模型，也可以先用随机或 smoke checkpoint 验证输入预处理、消息频率和安全悬停。
+
+5. 然后接入 RACER 候选任务
+
+这里存在一个需要特别处理的工程问题：不能为几十个并行 Isaac 编队各启动一套 16 机 ROS RACER 节点，速度和内存都难以承受。
+
+建议采用两级方式：
+
+- 大规模 Isaac 训练：使用与 `RLTask` 相同格式的轻量候选任务适配器，或者回放真实 RACER 任务数据；
+- 单编队集成测试和后期微调：运行真正的 C++ RACER、ROS 地图融合和两两协商。
+
+低层避障可以先用随机局部目标训练，不依赖 RACER。候选选择头随后再使用 RACER 候选数据训练，这与当前文档中的课程顺序一致：[README_RMAPPO.md](/Users/yoloflps/Desktop/PROJECT/explore/RACER-main/training/README_RMAPPO.md:67)。
+
+6. 最后逐步扩展到多机
+
+按以下顺序：
+
+```text
+1 机 / 30 m
+→ 4 机 / 60 m
+→ 8 机 / 100 m + 通信延迟和丢包
+→ 16 机 / 150 m
+→ ROS RACER 完整闭环
+→ 真机低速测试
+```
+
+多机阶段再引入邻机状态、机间碰撞、团队唯一体素奖励和通信扰动。Transformer 暂时不应成为下一步；先以现有 CNN+GRU 建立可运行基线，之后再比较 Transformer 是否真正改善探索效率。
+
+所以现在最具体的里程碑是：
+
+> 在 Ubuntu + NVIDIA 训练机上，实现并跑通“单机 D455M 深度 + Isaac 动力学 + 随机局部目标 + RMAPPO 避障”的 `IsaacRMAPPOBackend`。
+
+完成这个里程碑后，项目才真正进入可训练状态。目前 smoke 只证明 PPO 代码路径能运行，不能替代这一步。
+
+</details>

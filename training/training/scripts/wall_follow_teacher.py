@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 import torch
 from tensordict.nn import TensorDictModuleBase
 
-from utils import vec_to_world
+from geometry_utils import vec_to_world
 
 
 PHASE_SIDE_SELECTION = 0

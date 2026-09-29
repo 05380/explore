@@ -6,7 +6,8 @@ from tensordict.nn import TensorDictModuleBase, TensorDictSequential, TensorDict
 from einops.layers.torch import Rearrange
 from torchrl.modules import ProbabilisticActor
 from torchrl.envs.transforms import CatTensors
-from utils import ValueNorm, make_mlp, IndependentNormal, Actor, GAE, make_batch, IndependentBeta, BetaActor, vec_to_world
+from geometry_utils import vec_to_world
+from utils import ValueNorm, make_mlp, IndependentNormal, Actor, GAE, make_batch, IndependentBeta, BetaActor
 
 class PPO(TensorDictModuleBase):
     def __init__(self, cfg, observation_spec, action_spec, device):
