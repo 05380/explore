@@ -70,7 +70,7 @@ def main() -> None:
                 "headless": headless,
                 "multi_gpu": bool(app_cfg.get("multi_gpu", False)),
                 "anti_aliasing": int(app_cfg.get("anti_aliasing", 0)),
-                "fast_shutdown": bool(app_cfg.get("fast_shutdown", True)),
+                "fast_shutdown": bool(app_cfg.get("fast_shutdown", False)),
             }
         )
 
@@ -236,7 +236,32 @@ def main() -> None:
                 probe = None
                 gc.collect()
         if simulation_app is not None:
-            simulation_app.close()
+            from racer_rmappo.isaac_runtime import (
+                active_exception_exit_code,
+                close_simulation_app_safely,
+            )
+
+            shutdown_exit_code = active_exception_exit_code()
+            observation = None
+            critic_state = None
+            action = None
+            reward = None
+            done = None
+            info = None
+            final_info = None
+            gc.collect()
+            try:
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            except (NameError, RuntimeError):
+                pass
+            close_simulation_app_safely(
+                simulation_app,
+                hard_exit_after_shutdown=bool(
+                    app_cfg.get("hard_exit_after_shutdown", False)
+                ),
+                process_exit_code=shutdown_exit_code,
+            )
 
 
 if __name__ == "__main__":

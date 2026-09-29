@@ -330,7 +330,17 @@ class IsaacSingleNavigationBackend:
         return state.reshape(1, 1, 13)
 
     def reset(self) -> Tuple[Dict[str, Tensor], Tensor]:
-        self.last_telemetry = self.probe.reset()
+        consume_initial = getattr(
+            self.probe, "consume_initial_reset_telemetry", None
+        )
+        initial_telemetry = (
+            consume_initial() if callable(consume_initial) else None
+        )
+        self.last_telemetry = (
+            initial_telemetry
+            if initial_telemetry is not None
+            else self.probe.reset()
+        )
         self.last_telemetry = self.probe.synchronize_pose_to_renderer(
             self.reset_pose_sync_control_steps
         )
@@ -506,6 +516,11 @@ class IsaacSingleNavigationBackend:
             "command_body": command.detach().clone(),
             "actual_speed_mps": torch.tensor(
                 [float(telemetry["speed_mps"])], device=self.device
+            ),
+            "obstacle_clearance_m": self.last_clearance_m.reshape(1).clone(),
+            "position_m": position.detach().clone(),
+            "episode_steps": torch.tensor(
+                [float(self.step_count)], device=self.device
             ),
         }
 

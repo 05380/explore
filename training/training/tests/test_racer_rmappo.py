@@ -17,6 +17,7 @@ if str(SCRIPTS_PACKAGE) not in sys.path:
 
 from racer_rmappo.config import apply_curriculum_stage, load_config
 from racer_rmappo.isaac_adapter import validate_backend_shapes, validate_step_info
+from racer_rmappo.isaac_scenarios import apply_navigation_scenario
 from racer_rmappo.model import CentralizedCritic, SharedRecurrentActor
 from racer_rmappo.reward import RewardComposer
 from racer_rmappo.smoke_env import ContractSmokeEnv
@@ -44,6 +45,21 @@ def test_contract_parameters_are_synchronized():
     assert cfg["actor_observation"]["racer_candidates"]["visible_gain_normalizer"] == 20000.0
     assert cfg["action"]["viewpoint_selection"]["max_position_offset_m"] == [1.0, 1.0, 0.5]
     assert check_contract(cfg)["valid"] is True
+
+
+def test_wall_avoidance_curriculum_and_isaac_scenario_are_explicit():
+    cfg = apply_curriculum_stage(load_config(), "single_agent_wall_avoidance")
+    assert cfg["experiment"]["num_agents"] == 1
+    assert cfg["training"]["curriculum_stage"] == "single_agent_wall_avoidance"
+
+    isaac_path = Path(__file__).resolve().parents[2] / "configs" / "isaac_single.yaml"
+    import yaml
+
+    base = yaml.safe_load(isaac_path.read_text(encoding="utf-8"))
+    active = apply_navigation_scenario(base, "wall_avoidance")
+    assert base["navigation_backend"]["fixed_target_position_m"] == [2.5, 0.0, 1.5]
+    assert active["navigation_backend"]["fixed_target_position_m"] == [6.0, 0.0, 1.5]
+    assert active["navigation_backend"]["active_scenario"] == "wall_avoidance"
 
 
 def test_actor_critic_shapes():

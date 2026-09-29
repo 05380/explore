@@ -20,7 +20,10 @@ from racer_rmappo.isaac_single_backend import (
     scale_navigation_action,
     world_to_yaw_local,
 )
-from racer_rmappo.rule_navigation import proportional_navigation_action
+from racer_rmappo.rule_navigation import (
+    proportional_navigation_action,
+    waypoint_navigation_action,
+)
 
 
 def load_isaac_config():
@@ -52,6 +55,8 @@ class FakePhysicalProbe:
         self.yaw = 0.0
         self.closed = False
         self.pose_sync_calls = 0
+        self.reset_calls = 0
+        self.initial_reset_available = True
 
     def _telemetry(self):
         half = 0.5 * self.yaw
@@ -70,9 +75,17 @@ class FakePhysicalProbe:
         }
 
     def reset(self):
+        self.reset_calls += 1
+        self.initial_reset_available = False
         self.position = torch.tensor([0.0, 0.0, 1.5])
         self.velocity.zero_()
         self.yaw = 0.0
+        return self._telemetry()
+
+    def consume_initial_reset_telemetry(self):
+        if not self.initial_reset_available:
+            return None
+        self.initial_reset_available = False
         return self._telemetry()
 
     def step(self, command):
@@ -131,6 +144,28 @@ def test_world_to_yaw_local_uses_forward_left_up_convention():
     assert local.tolist() == pytest.approx([1.0, 0.0, 0.2], abs=1e-6)
 
 
+def test_wall_validation_waypoint_produces_navigation_only_action():
+    cfg = load_config()
+    telemetry = {
+        "position_m": [0.0, 0.0, 1.5],
+        "yaw_rad": 0.0,
+    }
+    action = waypoint_navigation_action(
+        telemetry,
+        [2.7, -2.7, 1.5],
+        cfg["actor_observation"]["selected_target"],
+        cfg["action"]["physical_limits"],
+        position_gain=0.8,
+        yaw_gain=1.5,
+        max_cruise_speed_mps=0.8,
+    )
+    assert action.shape == (1, 1, 9)
+    assert action[0, 0, 0].item() > 0.0
+    assert action[0, 0, 1].item() < 0.0
+    assert action[0, 0, 3].item() < 0.0
+    assert action[0, 0, 4:].abs().sum().item() == 0.0
+
+
 def test_backend_clearance_uses_validated_axial_depth_not_radial_annotator():
     backend, probe = make_backend()
     probe.depth_camera.plane_depth_m = 4.0
@@ -143,6 +178,11 @@ def test_backend_reset_synchronizes_fixed_camera_pose_once():
     backend, probe = make_backend()
     backend.reset()
     assert probe.pose_sync_calls == 1
+    assert probe.reset_calls == 0
+
+    backend.reset()
+    assert probe.pose_sync_calls == 2
+    assert probe.reset_calls == 1
 
 
 def test_single_navigation_backend_matches_rmappo_contract():

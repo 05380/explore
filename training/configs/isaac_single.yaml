@@ -4,7 +4,13 @@ app:
   headless: true
   multi_gpu: false
   anti_aliasing: 0
-  fast_shutdown: true
+  # RTX/Replicator camera resources are drained explicitly on exit. The fast
+  # plugin-unload path intermittently segfaults after longer Isaac 2023.1 runs.
+  fast_shutdown: false
+  # This locked build can complete native Kit shutdown and then crash while
+  # Python finalizes stale C++ wrappers. Reports are flushed before using the
+  # standalone-process hard-exit compatibility path.
+  hard_exit_after_shutdown: true
 
 sim:
   # 120 Hz rigid-body simulation. One policy action is held for six physics
@@ -126,7 +132,29 @@ navigation_backend:
     reset_speed_tolerance_mps: 0.001
     reset_yaw_tolerance_rad: 0.01
     reset_depth_mae_tolerance: 0.02
+    # Independent absolute check at the optical axis. At the configured
+    # 3.25 m front-wall range this is roughly a 0.3 m metric-depth tolerance.
+    reset_center_inverse_depth_tolerance: 0.03
     max_torch_cuda_memory_growth_mib: 256.0
+  scenarios:
+    wall_avoidance:
+      # The straight spawn-to-goal segment crosses contact_wall. PPO receives
+      # only this final target; validation_waypoints_m are exclusively for the
+      # deterministic reachability probe and are never part of observations.
+      fixed_target_position_m: [6.0, 0.0, 1.5]
+      fixed_target_yaw_rad: 0.0
+      episode_seconds: 30.0
+      terminate_on_stall: true
+      blocking_obstacle: contact_wall
+      validation_waypoints_m:
+        - [2.7, -2.7, 1.5]
+        - [5.3, -2.7, 1.5]
+      waypoint_position_tolerance_m: 0.30
+      validation_position_gain: 0.8
+      validation_yaw_gain: 1.5
+      validation_cruise_speed_mps: 0.8
+      validation_max_steps: 400
+      validation_wall_visible_clearance_m: 4.0
 
 probe:
   seed: 0

@@ -52,12 +52,27 @@ def build_backend(cfg: Mapping[str, object], device: torch.device):
 
 
 class RMAPPOTrainer:
-    def __init__(self, cfg: Dict[str, object]) -> None:
+    def __init__(self, cfg: Dict[str, object], backend=None) -> None:
         self.cfg = cfg
         seed = int(cfg["training"]["seed"])
         set_seed(seed)
         self.device = resolve_device(str(cfg["training"]["device"]))
-        self.backend = build_backend(cfg, self.device)
+        if backend is None:
+            self.backend = build_backend(cfg, self.device)
+        else:
+            self.backend = backend
+            validate_backend_shapes(self.backend)
+            if self.backend.num_agents != int(cfg["experiment"]["num_agents"]):
+                raise ValueError(
+                    "injected backend agent count does not match experiment.num_agents"
+                )
+            if self.backend.num_envs != int(
+                cfg["training"]["num_parallel_swarms"]
+            ):
+                raise ValueError(
+                    "injected backend environment count does not match "
+                    "training.num_parallel_swarms"
+                )
         ppo = cfg["ppo"]
         depth = cfg["actor_observation"]["depth"]
         self.actor = SharedRecurrentActor(
@@ -109,6 +124,8 @@ class RMAPPOTrainer:
         collision_sum = 0.0
         goal_sum = 0.0
         coverage_sum = 0.0
+        minimum_obstacle_clearance = math.inf
+        completed_episode_steps = 0.0
         step_metric_sums = {
             name: 0.0
             for name in (
@@ -159,6 +176,18 @@ class RMAPPOTrainer:
             collision_sum += float(info["collision"].mean())
             goal_sum += float(info["goal_reached"].mean())
             coverage_sum += float(info["coverage"].mean())
+            if "obstacle_clearance_m" in info:
+                minimum_obstacle_clearance = min(
+                    minimum_obstacle_clearance,
+                    float(info["obstacle_clearance_m"].min()),
+                )
+            if "episode_steps" in info:
+                completed_episode_steps += float(
+                    (
+                        info["episode_steps"]
+                        * info["episode_finished"]
+                    ).sum()
+                )
             for key in step_metric_sums:
                 step_metric_sums[key] += float(info[key].mean())
             for key in episode_metric_sums:
@@ -197,6 +226,17 @@ class RMAPPOTrainer:
             rollout_metrics[f"env/{key}_step_rate"] = value / steps
         episode_count = episode_metric_sums["episode_finished"]
         rollout_metrics["episode/count"] = episode_count
+        rollout_metrics["env/minimum_obstacle_clearance_m"] = (
+            minimum_obstacle_clearance
+            if math.isfinite(minimum_obstacle_clearance)
+            else 0.0
+        )
+        rollout_metrics["episode/duration_s_mean"] = (
+            completed_episode_steps
+            / (episode_count * float(self.cfg["experiment"]["control_hz"]))
+            if episode_count > 0.0
+            else 0.0
+        )
         for key in (
             "episode_success",
             "episode_collision",
@@ -365,6 +405,8 @@ class RMAPPOTrainer:
         collisions = 0.0
         goals = 0.0
         coverage = 0.0
+        minimum_obstacle_clearance = math.inf
+        completed_episode_steps = 0.0
         episode_sums: Dict[str, float] = {
             key: 0.0
             for key in (
@@ -391,6 +433,18 @@ class RMAPPOTrainer:
             collisions += float(info["collision"].mean())
             goals += float(info["goal_reached"].mean())
             coverage += float(info["coverage"].mean())
+            if "obstacle_clearance_m" in info:
+                minimum_obstacle_clearance = min(
+                    minimum_obstacle_clearance,
+                    float(info["obstacle_clearance_m"].min()),
+                )
+            if "episode_steps" in info:
+                completed_episode_steps += float(
+                    (
+                        info["episode_steps"]
+                        * info["episode_finished"]
+                    ).sum()
+                )
             for key in episode_sums:
                 episode_sums[key] += float(info[key].sum())
         episode_count = episode_sums["episode_finished"]
@@ -402,6 +456,17 @@ class RMAPPOTrainer:
             "coverage_mean": coverage / steps,
             "episode_count": episode_count,
             "coverage_target_episode_count": coverage_hits,
+            "minimum_obstacle_clearance_m": (
+                minimum_obstacle_clearance
+                if math.isfinite(minimum_obstacle_clearance)
+                else 0.0
+            ),
+            "episode_duration_s_mean": (
+                completed_episode_steps
+                / (episode_count * float(self.cfg["experiment"]["control_hz"]))
+                if episode_count > 0.0
+                else 0.0
+            ),
             "time_to_coverage_s_mean": (
                 episode_sums["coverage_target_steps"] /
                 (coverage_hits * float(self.cfg["experiment"]["control_hz"]))

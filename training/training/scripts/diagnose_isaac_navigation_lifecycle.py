@@ -50,6 +50,82 @@ def wrapped_abs_error(actual: float, expected: float) -> float:
     return abs(math.atan2(math.sin(actual - expected), math.cos(actual - expected)))
 
 
+def ray_box_distance(
+    origin: list[float],
+    direction: list[float],
+    center: list[float],
+    size: list[float],
+) -> float:
+    """Return the first positive hit of a ray with an axis-aligned box."""
+    direction_norm = math.sqrt(sum(value * value for value in direction))
+    if direction_norm <= 1e-9:
+        raise ValueError("camera forward direction must be non-zero")
+    unit_direction = [value / direction_norm for value in direction]
+    lower = [value - 0.5 * width for value, width in zip(center, size)]
+    upper = [value + 0.5 * width for value, width in zip(center, size)]
+    near = -math.inf
+    far = math.inf
+    for origin_axis, direction_axis, lower_axis, upper_axis in zip(
+        origin, unit_direction, lower, upper
+    ):
+        if abs(direction_axis) <= 1e-9:
+            if origin_axis < lower_axis or origin_axis > upper_axis:
+                raise ValueError("camera optical axis does not intersect front obstacle")
+            continue
+        first = (lower_axis - origin_axis) / direction_axis
+        second = (upper_axis - origin_axis) / direction_axis
+        near = max(near, min(first, second))
+        far = min(far, max(first, second))
+    if far < max(near, 0.0):
+        raise ValueError("front obstacle lies outside the camera optical ray")
+    return max(near, 0.0)
+
+
+def expected_front_inverse_depth(isaac_cfg: dict) -> tuple[float, float]:
+    """Compute the configured front wall's expected actor center value."""
+    camera_cfg = isaac_cfg["camera"]
+    probe_cfg = camera_cfg["probe"]
+    obstacle_name = str(probe_cfg["front_obstacle"])
+    obstacle = next(
+        (
+            item
+            for item in isaac_cfg["scene"]["obstacles"]
+            if str(item["name"]) == obstacle_name
+        ),
+        None,
+    )
+    if obstacle is None:
+        raise ValueError(f"front obstacle {obstacle_name!r} is not configured")
+    spawn = [float(value) for value in isaac_cfg["scene"]["spawn_position_m"]]
+    mount = [float(value) for value in camera_cfg["mount_position_body_m"]]
+    origin = [value + offset for value, offset in zip(spawn, mount)]
+    depth_m = ray_box_distance(
+        origin,
+        [float(value) for value in camera_cfg["forward_axis_body"]],
+        [float(value) for value in obstacle["position_m"]],
+        [float(value) for value in obstacle["size_m"]],
+    )
+    minimum = float(camera_cfg["min_depth_m"])
+    maximum = float(camera_cfg["max_depth_m"])
+    if not minimum <= depth_m <= maximum:
+        raise ValueError(
+            f"expected front depth {depth_m:.3f} m is outside camera range"
+        )
+    normalized = ((1.0 / depth_m) - (1.0 / maximum)) / (
+        (1.0 / minimum) - (1.0 / maximum)
+    )
+    return depth_m, min(max(normalized, 0.0), 1.0)
+
+
+def actor_center_median(depth) -> float:
+    """Return a robust 3x3 median from the newest actor depth frame."""
+    newest = depth[0, 0, -1]
+    row = int(newest.shape[-2]) // 2
+    column = int(newest.shape[-1]) // 2
+    patch = newest[row - 1 : row + 2, column - 1 : column + 2]
+    return float(patch.median().item())
+
+
 def main() -> None:
     args = parse_args()
     isaac_config_path = args.isaac_config.expanduser().resolve()
@@ -85,7 +161,7 @@ def main() -> None:
                 "headless": headless,
                 "multi_gpu": bool(app_cfg.get("multi_gpu", False)),
                 "anti_aliasing": int(app_cfg.get("anti_aliasing", 0)),
-                "fast_shutdown": bool(app_cfg.get("fast_shutdown", True)),
+                "fast_shutdown": bool(app_cfg.get("fast_shutdown", False)),
             }
         )
 
@@ -119,6 +195,13 @@ def main() -> None:
         backend = IsaacSingleNavigationBackend(rmappo_cfg, isaac_cfg, probe)
         observation, critic_state = validate_backend_shapes(backend)
         baseline_depth = observation["depth"].detach().clone()
+        expected_center_depth_m, expected_center_inverse = (
+            expected_front_inverse_depth(isaac_cfg)
+        )
+        baseline_center_inverse = actor_center_median(baseline_depth)
+        baseline_center_inverse_error = abs(
+            baseline_center_inverse - expected_center_inverse
+        )
         spawn = torch.tensor(
             isaac_cfg["scene"]["spawn_position_m"],
             dtype=torch.float32,
@@ -188,6 +271,10 @@ def main() -> None:
             reset_depth_mae = float(
                 (observation["depth"] - baseline_depth).abs().mean().item()
             )
+            reset_center_inverse = actor_center_median(observation["depth"])
+            reset_center_inverse_error = abs(
+                reset_center_inverse - expected_center_inverse
+            )
             depth_frame_consistency = float(
                 (
                     observation["depth"][:, :, 1:]
@@ -230,6 +317,8 @@ def main() -> None:
                 "reset_speed_mps": float(reset_telemetry["speed_mps"]),
                 "reset_yaw_abs_error_rad": reset_yaw_error,
                 "reset_depth_mae": reset_depth_mae,
+                "reset_center_inverse_depth": reset_center_inverse,
+                "reset_center_inverse_depth_error": reset_center_inverse_error,
                 "reset_depth_frame_consistency_max_abs": depth_frame_consistency,
                 "reset_collision": bool(reset_telemetry["collision"]),
                 "reset_out_of_bounds": bool(reset_telemetry["out_of_bounds"]),
@@ -241,7 +330,8 @@ def main() -> None:
                 f"[lifecycle] episode={episode_index + 1}/{episodes} "
                 f"success={success} steps={episode_steps} "
                 f"reset_pos_error={reset_position_error:.6f} "
-                f"reset_depth_mae={reset_depth_mae:.6f}",
+                f"reset_depth_mae={reset_depth_mae:.6f} "
+                f"reset_center_inverse_error={reset_center_inverse_error:.6f}",
                 flush=True,
             )
 
@@ -257,6 +347,10 @@ def main() -> None:
         )
         max_reset_depth_frame_inconsistency = max(
             item["reset_depth_frame_consistency_max_abs"]
+            for item in episode_reports
+        )
+        max_reset_center_inverse_error = max(
+            item["reset_center_inverse_depth_error"]
             for item in episode_reports
         )
         reset_fault_count = sum(
@@ -297,6 +391,14 @@ def main() -> None:
             <= float(lifecycle_cfg["reset_yaw_tolerance_rad"])
             and max_reset_depth_mae
             <= float(lifecycle_cfg["reset_depth_mae_tolerance"])
+            and baseline_center_inverse_error
+            <= float(
+                lifecycle_cfg["reset_center_inverse_depth_tolerance"]
+            )
+            and max_reset_center_inverse_error
+            <= float(
+                lifecycle_cfg["reset_center_inverse_depth_tolerance"]
+            )
             and max_reset_depth_frame_inconsistency <= 1e-6
             and memory_peak_growth["reserved"]
             <= float(lifecycle_cfg["max_torch_cuda_memory_growth_mib"])
@@ -321,6 +423,15 @@ def main() -> None:
             "max_reset_speed_mps": max_reset_speed,
             "max_reset_yaw_abs_error_rad": max_reset_yaw_error,
             "max_reset_depth_mae": max_reset_depth_mae,
+            "expected_reset_center_depth_m": expected_center_depth_m,
+            "expected_reset_center_inverse_depth": expected_center_inverse,
+            "baseline_center_inverse_depth": baseline_center_inverse,
+            "baseline_center_inverse_depth_error": (
+                baseline_center_inverse_error
+            ),
+            "max_reset_center_inverse_depth_error": (
+                max_reset_center_inverse_error
+            ),
             "max_reset_depth_frame_consistency_max_abs": (
                 max_reset_depth_frame_inconsistency
             ),
@@ -386,7 +497,34 @@ def main() -> None:
                 probe = None
                 gc.collect()
         if simulation_app is not None:
-            simulation_app.close()
+            from racer_rmappo.isaac_runtime import (
+                active_exception_exit_code,
+                close_simulation_app_safely,
+            )
+
+            shutdown_exit_code = active_exception_exit_code()
+            observation = None
+            critic_state = None
+            baseline_depth = None
+            spawn = None
+            action = None
+            reward = None
+            done = None
+            info = None
+            final_info = None
+            gc.collect()
+            try:
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            except (NameError, RuntimeError):
+                pass
+            close_simulation_app_safely(
+                simulation_app,
+                hard_exit_after_shutdown=bool(
+                    app_cfg.get("hard_exit_after_shutdown", False)
+                ),
+                process_exit_code=shutdown_exit_code,
+            )
 
 
 if __name__ == "__main__":

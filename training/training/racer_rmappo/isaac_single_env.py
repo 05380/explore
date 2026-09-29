@@ -143,6 +143,12 @@ def validate_probe_config(cfg: Mapping[str, Any]) -> None:
         raise ValueError(
             "navigation_backend.reset_pose_sync_control_steps must be at least one"
         )
+    lifecycle = navigation.get("lifecycle_probe", {})
+    if float(lifecycle.get("reset_center_inverse_depth_tolerance", 0.0)) <= 0.0:
+        raise ValueError(
+            "navigation_backend.lifecycle_probe."
+            "reset_center_inverse_depth_tolerance must be positive"
+        )
 
 
 def limit_velocity_command(
@@ -376,7 +382,14 @@ class IsaacSingleDroneProbe:
         self.target_yaw = torch.zeros(1, device=self.device)
         self.last_world_velocity_command = torch.zeros(3, device=self.device)
         self.last_yaw_rate_command = torch.zeros(1, device=self.device)
+        self._initial_reset_available = False
         self.reset()
+        # The constructor leaves the articulation in the exact state required
+        # by a new backend.  Let that backend consume this state once instead
+        # of immediately issuing a second tensor teleport.  Isaac Sim 2023.1
+        # can reject that duplicate startup teleport and leave the first RTX
+        # camera frame stale even though tensor telemetry looks correct.
+        self._initial_reset_available = True
 
     def close(self) -> None:
         """Release PhysX views before the owning SimulationApp shuts down."""
@@ -429,6 +442,7 @@ class IsaacSingleDroneProbe:
             physics_view.flush()
 
     def reset(self) -> Dict[str, Any]:
+        self._initial_reset_available = False
         self.drone._reset_idx(self.env_ids, train=False)
         self.drone.set_world_poses(self.spawn_position, self.spawn_orientation)
         self.drone.set_velocities(self.zero_velocities)
@@ -437,6 +451,17 @@ class IsaacSingleDroneProbe:
         self.last_world_velocity_command.zero_()
         self.last_yaw_rate_command.zero_()
         self._flush()
+        return self.telemetry()
+
+    def consume_initial_reset_telemetry(self) -> Dict[str, Any] | None:
+        """Return the constructor-reset state exactly once.
+
+        This narrow hand-off avoids a redundant Direct-GPU root-pose write at
+        backend startup.  All episode resets still execute :meth:`reset`.
+        """
+        if not self._initial_reset_available:
+            return None
+        self._initial_reset_available = False
         return self.telemetry()
 
     def set_test_state(self, position: Tensor, velocity: Tensor | None = None) -> None:

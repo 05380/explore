@@ -22,10 +22,10 @@
 
 `smoke` 环境只验证训练代码、维度、速度限幅、奖励与循环能否工作。它现在会把圆柱深度图沿固定机载相机视锥反投影并统计射线经过的体素，不再把无人机所在体素当成“新观测”；但它仍没有真实飞行动力学、纹理、完整建筑网格或真实传感器噪声，产出的权重不得用于真机，也不代表避障训练完成。
 
-高保真 `isaac` backend 尚未完成。P1 单机物理探针已经验证 Hummingbird、Lee 控制器、2 m/s 指令限速、接触力、越界和 reset；具体命令与判据见 [P1_ISAAC_SINGLE_PROBE.md](P1_ISAAC_SINGLE_PROBE.md)。P2 的第一步又增加了固定机载 D455M 深度探针，验证 640×360 metric depth、0.9～20 m 范围、机体偏航跟随和 64×40 inverse-depth，见 [P2_D455M_CAMERA_PROBE.md](P2_D455M_CAMERA_PROBE.md)。这些探针仍没有完整 PPO 观测、目标/奖励和 episode 生命周期，不能当作 backend。旧 `env.py` 是单机 4 m LiDAR 任务，代码会在选择 `--backend isaac` 时明确报错，防止误训。Isaac backend 必须按
+高保真 `isaac` backend 目前完成的是单机导航子集，不是最终多机探索 backend。P1 已验证 Hummingbird、Lee 控制器、2 m/s 指令限速、接触力、越界和 reset，见 [P1_ISAAC_SINGLE_PROBE.md](P1_ISAAC_SINGLE_PROBE.md)。P2 又验证了固定机载 D455M 的 640×360 metric depth、0.9～20 m 范围、机体偏航跟随、64×40 inverse-depth、完整 PPO 观测/奖励合同和连续 20 回合 reset 生命周期，见 [P2_D455M_CAMERA_PROBE.md](P2_D455M_CAMERA_PROBE.md)、[P2_SINGLE_NAV_BACKEND.md](P2_SINGLE_NAV_BACKEND.md) 和 [P2_SINGLE_NAV_LIFECYCLE.md](P2_SINGLE_NAV_LIFECYCLE.md)。旧 `env.py` 是单机 4 m LiDAR 任务，不用于本项目。通用 `train_rmappo.py --backend isaac` 仍主动拒绝没有生命周期所有者的调用；单机 Isaac 必须使用专用入口。backend 遵守
 `training/training/racer_rmappo/isaac_adapter.py` 返回深度、ego、已选 target、RACER candidates、decision mask、邻机状态和 centralized critic state。
 
-目前完整 `isaac` backend 和 ROS 在线推理节点仍未实现；现在除训练链路 smoke 外，可以运行 P1 单机物理探针、P2 D455M 相机探针、不更新 PPO 参数的单机固定目标 backend 合同探针，以及连续成功回合/reset 压力探针，分别见 [P2_SINGLE_NAV_BACKEND.md](P2_SINGLE_NAV_BACKEND.md) 和 [P2_SINGLE_NAV_LIFECYCLE.md](P2_SINGLE_NAV_LIFECYCLE.md)。这些通过前不能开始有效的避障训练，更不能直接部署。
+P3 已增加墙后目标、确定性绕墙可达性探针、单机 Isaac PPO 训练入口和确定性评估入口，见 [P3_SINGLE_WALL_PPO.md](P3_SINGLE_WALL_PPO.md)。它只训练四维导航头；地图、frontier、候选选择、多机通信和任务协商仍未接入，因此不能称为完整探索系统，也不能直接部署。
 
 ## 环境诊断
 
@@ -69,26 +69,22 @@ python training/scripts/eval_rmappo.py \
 配置真源为 `swarm_exploration/exploration_manager/config/rmappo_d455m_16.yaml`。建议逐阶段训练并使用前一阶段 checkpoint 初始化：
 
 1. `single_agent_sparse_static`：1 机，30×30×5 m；
-2. `four_agent_dense_static`：4 机，60×60×5 m；
-3. `eight_agent_comm_randomization`：8 机，100×100×5 m；
-4. `sixteen_agent_full`：16 机，150×150×5 m。
+2. `single_agent_wall_avoidance`：1 机，固定墙后目标，仅训练低层导航；
+3. `four_agent_dense_static`：4 机，60×60×5 m；
+4. `eight_agent_comm_randomization`：8 机，100×100×5 m；
+5. `sixteen_agent_full`：16 机，150×150×5 m。
 
 每个规模内部再分三段更稳定：先固定候选 0 只训练低层避障；再冻结低层或降低其学习率，打开候选选择；最后两者联合微调。当前统一 trainer 已支持混合动作和事件 mask，但“冻结/分组学习率”尚未做成命令行选项，接 Isaac backend 时应补上。
 
-示例命令（只有 Isaac backend 实现后才可用）：
+当前单机墙体阶段使用拥有完整 `SimulationApp` 生命周期的专用入口：
 
 ```bash
-python training/scripts/train_rmappo.py \
-  --backend isaac --device cuda:0 --stage single_agent_sparse_static \
-  --num-envs 64 --total-steps 20000000 --output runs/stage1
-
-python training/scripts/train_rmappo.py \
-  --backend isaac --device cuda:0 --stage four_agent_dense_static \
-  --num-envs 16 --total-steps 40000000 --resume runs/stage1/checkpoint_final.pt \
-  --output runs/stage2
+python training/scripts/train_isaac_single_ppo.py \
+  --headless --total-steps 1024 \
+  --output runs/isaac_single_wall/ppo_smoke
 ```
 
-`num-envs` 表示并行编队数，不是无人机数。可并行编队数必须从 2/4 开始逐步增加，以 GPU 显存和仿真 FPS 为准。
+当前入口严格限制为一个物理环境、一架无人机。后续 `num-envs` 表示并行编队数，不是无人机数；在实现批量物理场景和相机前不能只改参数宣称已经并行。
 
 ## 导出
 

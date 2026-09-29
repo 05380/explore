@@ -1,6 +1,6 @@
 # Isaac Sim 内闭环协同探索：分阶段实施计划
 
-更新日期：2026-09-28
+更新日期：2026-09-29
 
 适用项目：RACER-main
 
@@ -50,7 +50,7 @@ frontier / 区域任务 / 两两协商
 | 当前位置 | 已有内容 | 后续处理 |
 |---|---|---|
 | [model.py](training/training/racer_rmappo/model.py) | CNN + GRU 共享 actor、候选选择与残差头、集中式 critic | 保留基线；补齐控制与选择时序、阶段开关 |
-| [trainer.py](training/training/racer_rmappo/trainer.py) | rollout、PPO 更新、评估；选择 isaac 会主动报错 | 接入 backend 和仿真生命周期 |
+| [trainer.py](training/training/racer_rmappo/trainer.py) | rollout、PPO 更新、评估；支持由专用 Isaac 入口注入 backend | 通用入口仍保持门禁；多机 backend 后再统一 |
 | [isaac_adapter.py](training/training/racer_rmappo/isaac_adapter.py) | MultiUAVBackend 协议和张量/指标检查 | 扩展为可验证的真实接口 |
 | [smoke_env.py](training/training/racer_rmappo/smoke_env.py) | 简化运动学、合成深度及射线体素统计 | 继续做快速回归，不作为飞行性能证据 |
 | [storage.py](training/training/racer_rmappo/storage.py) | 轨迹缓存、GAE，当前只有 done | 补齐截断 bootstrap，检查缓冲区别名 |
@@ -384,8 +384,8 @@ python training/scripts/eval_rmappo_isaac.py \
 ## 10. 最近三个可交付批次
 
 - [x] 批次 A / P0：固定 GPU 环境；smoke 测试；定义配置/坐标/相机/终止合同；建立 Isaac 入口与诊断框架。
-- [ ] 批次 B / P1：Ubuntu 单机物理探针已全部通过并正常退出；固定机载 D455M、metric depth、20 m 范围过滤、机体偏航跟随和 64×40 inverse-depth 探针代码已实现，待 Ubuntu 相机实测；单机固定目标 backend 的观测、目标、动作、奖励、回合和 info 合同代码也已实现，待相机通过后在 Ubuntu 顺序验收。
-- [ ] 批次 C / P2：单目标导航训练；动作分支禁用机制；回合截断和缓存修正；固定场景过拟合；未见目标布局评估。
+- [x] 批次 B / P1：Ubuntu 单机物理、固定 D455M、metric/inverse-depth、相机随体偏航、接触、reset、backend 合同和连续 20 回合生命周期均已通过；20/20 成功、深度 reset MAE 约 `2.2e-5`、正常退出码 0。
+- [ ] 批次 C / P2：墙后目标场景、确定性绕墙探针、单机 Isaac PPO 训练/评估入口和动作分支禁用已实现；下一步先通过 [P3_SINGLE_WALL_PPO.md](training/P3_SINGLE_WALL_PPO.md) 的可达性与 1024 transition 连通性验收，再进行固定场景过拟合和未见布局评估。
 
 后续按 P3 建图 → P4 单机探索 → P5 两机协商通信 → P6 扩展 → P7 正式评估推进。阶段通过由数据决定，不预设“训练若干天必定成功”。
 
