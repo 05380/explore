@@ -1,0 +1,81 @@
+schema_version: 1
+
+app:
+  headless: true
+  multi_gpu: false
+  anti_aliasing: 0
+  fast_shutdown: true
+
+sim:
+  physics_dt: 0.016
+  rendering_dt: 0.016
+  device: cuda:0
+  params:
+    gravity: [0.0, 0.0, -9.81]
+    use_gpu: true
+    use_gpu_pipeline: true
+    use_flatcache: true
+    enable_scene_query_support: true
+    solver_type: 1
+    enable_stabilization: true
+    bounce_threshold_velocity: 0.2
+    friction_offset_threshold: 0.04
+    friction_correlation_distance: 0.025
+    gpu_max_rigid_contact_count: 524288
+    gpu_max_rigid_patch_count: 163840
+    gpu_found_lost_pairs_capacity: 4194304
+    gpu_found_lost_aggregate_pairs_capacity: 33554432
+    gpu_total_aggregate_pairs_capacity: 4194304
+    gpu_heap_capacity: 67108864
+    gpu_temp_buffer_capacity: 16777216
+    gpu_max_num_partitions: 8
+
+scene:
+  size_m: [30.0, 30.0, 5.0]
+  spawn_position_m: [0.0, 0.0, 1.5]
+  flight_bounds_min_m: [-14.5, -14.5, 0.5]
+  flight_bounds_max_m: [14.5, 14.5, 4.5]
+  ground_color: [0.12, 0.12, 0.12]
+  obstacles:
+    - name: contact_wall
+      position_m: [4.0, 0.0, 1.5]
+      size_m: [1.0, 3.0, 3.0]
+    - name: box_west
+      position_m: [-4.0, -2.5, 1.25]
+      size_m: [2.0, 2.0, 2.5]
+    - name: wall_north
+      position_m: [0.0, 6.0, 1.5]
+      size_m: [6.0, 0.8, 3.0]
+
+drone:
+  model: hummingbird
+
+control:
+  command_frame: yaw_local
+  max_speed_mps: 2.0
+  max_yaw_rate_rps: 1.0
+  random_command_interval_steps: 125
+  random_command_overspeed_factor: 1.5
+  reference_boundary_margin_m: 1.0
+
+collision:
+  contact_force_threshold_n: 0.10
+  intentional_contact_steps: 20
+  clear_contact_steps: 30
+
+probe:
+  seed: 0
+  hover_steps: 1000
+  random_steps: 1000
+  reset_trials: 3
+  warmup_steps: 100
+  print_interval_steps: 100
+
+acceptance:
+  hover_max_position_error_m: 0.50
+  hover_final_position_error_m: 0.20
+  hover_min_up_z: 0.80
+  reset_max_position_error_m: 0.001
+  reset_max_speed_mps: 0.001
+  random_max_velocity_rmse_mps: 1.50
+  random_max_actual_speed_mps: 3.00

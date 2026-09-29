@@ -370,7 +370,7 @@ python training/scripts/eval_rmappo.py \
 ~~~bash
 cd /path/to/RACER-main/training
 python training/scripts/diagnose_isaac_backend.py \
-  --config configs/isaac_single.yaml --num-envs 1 --probe all
+  --config configs/isaac_single.yaml --probe all --headless
 python training/scripts/train_rmappo_isaac.py \
   --config configs/isaac_single.yaml --num-envs 1 \
   --total-steps 4096 --headless --output runs/isaac_single_check
@@ -383,8 +383,8 @@ python training/scripts/eval_rmappo_isaac.py \
 
 ## 10. 最近三个可交付批次
 
-- [ ] 批次 A / P0：固定 GPU 环境；smoke 测试；定义配置/坐标/相机/终止合同；建立 Isaac 入口与诊断框架。
-- [ ] 批次 B / P1：单机物理与固定相机；静态障碍；速度飞控适配；真实碰撞；完整 reset；满足 backend 形状和 info 合同。
+- [x] 批次 A / P0：固定 GPU 环境；smoke 测试；定义配置/坐标/相机/终止合同；建立 Isaac 入口与诊断框架。
+- [ ] 批次 B / P1：已实现第一阶段单机物理探针、静态障碍、速度飞控适配、真实接触检测和 reset；待 Ubuntu 探针验收、固定深度相机以及 backend 形状/info 合同。
 - [ ] 批次 C / P2：单目标导航训练；动作分支禁用机制；回合截断和缓存修正；固定场景过拟合；未见目标布局评估。
 
 后续按 P3 建图 → P4 单机探索 → P5 两机协商通信 → P6 扩展 → P7 正式评估推进。阶段通过由数据决定，不预设“训练若干天必定成功”。

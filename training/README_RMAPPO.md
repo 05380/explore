@@ -22,10 +22,10 @@
 
 `smoke` 环境只验证训练代码、维度、速度限幅、奖励与循环能否工作。它现在会把圆柱深度图沿固定机载相机视锥反投影并统计射线经过的体素，不再把无人机所在体素当成“新观测”；但它仍没有真实飞行动力学、纹理、完整建筑网格或真实传感器噪声，产出的权重不得用于真机，也不代表避障训练完成。
 
-尚未完成的是高保真 `isaac` backend。旧 `env.py` 是单机 4 m LiDAR 任务，代码会在选择 `--backend isaac` 时明确报错，防止误训。Isaac backend 必须按
+高保真 `isaac` backend 尚未完成。P1 第一阶段已经新增单机物理探针，用于验证 Hummingbird、Lee 控制器、2 m/s 限速、接触力、越界和 reset；具体命令与判据见 [P1_ISAAC_SINGLE_PROBE.md](P1_ISAAC_SINGLE_PROBE.md)。该探针没有深度相机和 PPO 观测，不能当作 backend。旧 `env.py` 是单机 4 m LiDAR 任务，代码会在选择 `--backend isaac` 时明确报错，防止误训。Isaac backend 必须按
 `training/training/racer_rmappo/isaac_adapter.py` 返回深度、ego、已选 target、RACER candidates、decision mask、邻机状态和 centralized critic state。
 
-目前 `isaac` backend 和 ROS 在线推理节点仍未实现，因此现在只能做训练链路 smoke 验证，不能开始有效的避障训练，更不能直接部署。
+目前完整 `isaac` backend 和 ROS 在线推理节点仍未实现；现在除训练链路 smoke 外，可以运行 P1 单机物理探针，但还不能开始有效的避障训练，更不能直接部署。
 
 ## 环境诊断
 
