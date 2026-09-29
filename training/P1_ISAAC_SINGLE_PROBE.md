@@ -67,6 +67,8 @@ runs/isaac_single_probe/report.json
 runs/isaac_single_probe/resolved_config.yaml
 ```
 
+脚本会直接从 `third_party/OmniDrones` 加载项目内版本，不要求预先执行 `pip install -e`。如果初始化期间发生异常，`report.json` 仍会写入异常类型、错误消息和 traceback；`resolved_config.yaml` 仅在环境初始化并运行探针后生成。
+
 若全量探针失败，用单项命令缩小范围：
 
 ```bash

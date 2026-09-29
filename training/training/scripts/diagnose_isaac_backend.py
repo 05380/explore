@@ -15,8 +15,11 @@ import yaml
 SCRIPT_DIR = Path(__file__).resolve().parent
 TRAINING_PACKAGE = SCRIPT_DIR.parent
 TRAINING_ROOT = TRAINING_PACKAGE.parent
-if str(TRAINING_PACKAGE) not in sys.path:
-    sys.path.insert(0, str(TRAINING_PACKAGE))
+OMNIDRONES_SOURCE = TRAINING_ROOT / "third_party" / "OmniDrones"
+for source_root in (TRAINING_PACKAGE, OMNIDRONES_SOURCE):
+    source_root_text = str(source_root)
+    if source_root_text not in sys.path:
+        sys.path.insert(0, source_root_text)
 
 DEFAULT_CONFIG = TRAINING_ROOT / "configs" / "isaac_single.yaml"
 DEFAULT_OUTPUT = TRAINING_ROOT / "runs" / "isaac_single_probe" / "report.json"
@@ -42,6 +45,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config_path = args.config.expanduser().resolve()
+    output_path = args.output.expanduser().resolve()
     with config_path.open("r", encoding="utf-8") as stream:
         cfg = yaml.safe_load(stream)
     if not isinstance(cfg, dict):
@@ -50,20 +54,21 @@ def main() -> None:
     app_cfg = cfg["app"]
     headless = bool(app_cfg["headless"]) if args.headless is None else bool(args.headless)
 
-    # SimulationApp must be created before importing the environment module,
-    # because that module lazily imports Isaac/Orbit/OmniDrones in its constructor.
-    from omni.isaac.kit import SimulationApp
-
-    simulation_app = SimulationApp(
-        {
-            "headless": headless,
-            "multi_gpu": bool(app_cfg.get("multi_gpu", False)),
-            "anti_aliasing": int(app_cfg.get("anti_aliasing", 0)),
-            "fast_shutdown": bool(app_cfg.get("fast_shutdown", True)),
-        }
-    )
-
+    simulation_app = None
     try:
+        # SimulationApp must be created before constructing the environment,
+        # because Isaac and OmniDrones modules are imported lazily there.
+        from omni.isaac.kit import SimulationApp
+
+        simulation_app = SimulationApp(
+            {
+                "headless": headless,
+                "multi_gpu": bool(app_cfg.get("multi_gpu", False)),
+                "anti_aliasing": int(app_cfg.get("anti_aliasing", 0)),
+                "fast_shutdown": bool(app_cfg.get("fast_shutdown", True)),
+            }
+        )
+
         from racer_rmappo.isaac_single_env import (
             IsaacSingleDroneProbe,
             validate_probe_config,
@@ -80,7 +85,6 @@ def main() -> None:
         report["config_path"] = str(config_path)
         report["headless"] = headless
 
-        output_path = args.output.expanduser().resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             json.dumps(report, indent=2, sort_keys=True), encoding="utf-8"
@@ -100,14 +104,30 @@ def main() -> None:
             raise SystemExit(2)
     except SystemExit:
         raise
-    except BaseException:
+    except BaseException as error:
+        exception_traceback = traceback.format_exc()
+        failure_report = {
+            "passed": False,
+            "probe": args.probe,
+            "config_path": str(config_path),
+            "headless": headless,
+            "exception_type": type(error).__name__,
+            "exception": str(error),
+            "traceback": exception_traceback,
+        }
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(failure_report, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
         print("P1_PROBE_EXCEPTION", flush=True)
-        traceback.print_exc()
+        print(exception_traceback, file=sys.stderr, end="", flush=True)
+        print(f"P1_PROBE_REPORT={output_path}", flush=True)
         raise
     finally:
-        simulation_app.close()
+        if simulation_app is not None:
+            simulation_app.close()
 
 
 if __name__ == "__main__":
     main()
-
