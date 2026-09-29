@@ -47,6 +47,8 @@ def validate_probe_config(cfg: Mapping[str, Any]) -> None:
     sim = cfg["sim"]
     if float(sim["physics_dt"]) <= 0.0:
         raise ValueError("sim.physics_dt must be positive")
+    if float(sim.get("rendering_dt", sim["physics_dt"])) <= 0.0:
+        raise ValueError("sim.rendering_dt must be positive")
     if not str(sim["device"]).startswith("cuda"):
         raise ValueError("the high-fidelity probe requires a CUDA device")
 
@@ -76,6 +78,24 @@ def validate_probe_config(cfg: Mapping[str, Any]) -> None:
     control = cfg["control"]
     if str(control.get("command_frame")) != "yaw_local":
         raise ValueError("control.command_frame must be 'yaw_local'")
+    control_hz = float(control["control_hz"])
+    physics_steps_per_action = int(control["physics_steps_per_action"])
+    if control_hz <= 0.0:
+        raise ValueError("control.control_hz must be positive")
+    if physics_steps_per_action < 1:
+        raise ValueError("control.physics_steps_per_action must be at least one")
+    configured_control_dt = 1.0 / control_hz
+    simulated_control_dt = float(sim["physics_dt"]) * physics_steps_per_action
+    if not math.isclose(
+        configured_control_dt,
+        simulated_control_dt,
+        rel_tol=1e-6,
+        abs_tol=1e-9,
+    ):
+        raise ValueError(
+            "control_hz must match sim.physics_dt * physics_steps_per_action: "
+            f"expected {configured_control_dt:.9f}s, got {simulated_control_dt:.9f}s"
+        )
     if float(control["max_speed_mps"]) <= 0.0:
         raise ValueError("control.max_speed_mps must be positive")
     if float(control["max_yaw_rate_rps"]) <= 0.0:
@@ -187,12 +207,12 @@ class IsaacSingleDroneProbe:
 
         sim_cfg = cfg["sim"]
         self.isaac_version = ".".join(str(item) for item in get_version())
-        self.dt = float(sim_cfg["physics_dt"])
+        self.physics_dt = float(sim_cfg["physics_dt"])
         self.device = torch.device(str(sim_cfg["device"]))
         self.sim = SimulationContext(
             stage_units_in_meters=1.0,
-            physics_dt=self.dt,
-            rendering_dt=float(sim_cfg.get("rendering_dt", self.dt)),
+            physics_dt=self.physics_dt,
+            rendering_dt=float(sim_cfg.get("rendering_dt", self.physics_dt)),
             sim_params=dict(sim_cfg.get("params", {})),
             backend="torch",
             device=str(self.device),
@@ -280,6 +300,11 @@ class IsaacSingleDroneProbe:
             scene_cfg["flight_bounds_max_m"], dtype=torch.float32, device=self.device
         )
         control = cfg["control"]
+        self.control_hz = float(control["control_hz"])
+        self.control_dt = 1.0 / self.control_hz
+        self.physics_steps_per_action = int(
+            control["physics_steps_per_action"]
+        )
         self.max_speed = float(control["max_speed_mps"])
         self.max_yaw_rate = float(control["max_yaw_rate_rps"])
         self.max_acceleration = float(control["max_acceleration_mps2"])
@@ -368,55 +393,66 @@ class IsaacSingleDroneProbe:
             raw, self.max_speed, self.max_yaw_rate
         ).reshape(4)
 
-        root_state = self._state()[..., :13].reshape(-1, 13)
-        current_yaw = quaternion_yaw_wxyz(root_state[..., 3:7])
-        desired_world_velocity = yaw_local_velocity_to_world(
-            command_limited[:3].reshape(1, 3), current_yaw
-        ).reshape(3)
-
-        # A policy may change direction instantaneously, while a real multirotor
-        # cannot. Rate-limit the velocity reference before sending it to Lee.
-        command_world_velocity = limit_vector_change(
-            self.last_world_velocity_command,
-            desired_world_velocity,
-            self.max_acceleration * self.dt,
-        )
-
         reference_min = self.bounds_min + self.reference_margin
         reference_max = self.bounds_max - self.reference_margin
-        current_position = root_state[0, :3]
-        command_world_velocity = limit_velocity_for_braking_distance(
-            current_position,
-            command_world_velocity,
-            reference_min,
-            reference_max,
-            self.max_acceleration,
-        )
-        self.last_world_velocity_command.copy_(command_world_velocity.detach())
-
         desired_yaw_rate = command_limited[3].reshape(1)
-        yaw_rate_delta = (desired_yaw_rate - self.last_yaw_rate_command).clamp(
-            -self.max_yaw_acceleration * self.dt,
-            self.max_yaw_acceleration * self.dt,
-        )
-        yaw_rate_command = self.last_yaw_rate_command + yaw_rate_delta
-        self.last_yaw_rate_command.copy_(yaw_rate_command.detach())
+        command_world_velocity = self.last_world_velocity_command.clone()
+        yaw_rate_command = self.last_yaw_rate_command.clone()
 
-        self.target_position.add_(command_world_velocity * self.dt)
-        self.target_position.clamp_(reference_min, reference_max)
-        self.target_yaw.add_(yaw_rate_command * self.dt)
-        self.target_yaw.copy_(
-            torch.atan2(torch.sin(self.target_yaw), torch.cos(self.target_yaw))
-        )
+        # Hold one policy action for a fixed number of physics steps. The Lee
+        # controller and reference filters still update at the physics rate.
+        for physics_step in range(self.physics_steps_per_action):
+            root_state = self._state()[..., :13].reshape(-1, 13)
+            current_yaw = quaternion_yaw_wxyz(root_state[..., 3:7])
+            desired_world_velocity = yaw_local_velocity_to_world(
+                command_limited[:3].reshape(1, 3), current_yaw
+            ).reshape(3)
 
-        rotor_action = self.controller(
-            root_state,
-            target_pos=self.target_position,
-            target_vel=command_world_velocity,
-            target_yaw=self.target_yaw,
-        )
-        self.drone.apply_action(rotor_action)
-        self.sim.step(render=self.render)
+            # A policy may change direction instantaneously, while a real
+            # multirotor cannot. Rate-limit its reference at the physics rate.
+            command_world_velocity = limit_vector_change(
+                self.last_world_velocity_command,
+                desired_world_velocity,
+                self.max_acceleration * self.physics_dt,
+            )
+            current_position = root_state[0, :3]
+            command_world_velocity = limit_velocity_for_braking_distance(
+                current_position,
+                command_world_velocity,
+                reference_min,
+                reference_max,
+                self.max_acceleration,
+            )
+            self.last_world_velocity_command.copy_(command_world_velocity.detach())
+
+            yaw_rate_delta = (
+                desired_yaw_rate - self.last_yaw_rate_command
+            ).clamp(
+                -self.max_yaw_acceleration * self.physics_dt,
+                self.max_yaw_acceleration * self.physics_dt,
+            )
+            yaw_rate_command = self.last_yaw_rate_command + yaw_rate_delta
+            self.last_yaw_rate_command.copy_(yaw_rate_command.detach())
+
+            self.target_position.add_(command_world_velocity * self.physics_dt)
+            self.target_position.clamp_(reference_min, reference_max)
+            self.target_yaw.add_(yaw_rate_command * self.physics_dt)
+            self.target_yaw.copy_(
+                torch.atan2(torch.sin(self.target_yaw), torch.cos(self.target_yaw))
+            )
+
+            rotor_action = self.controller(
+                root_state,
+                target_pos=self.target_position,
+                target_vel=command_world_velocity,
+                target_yaw=self.target_yaw,
+            )
+            self.drone.apply_action(rotor_action)
+            render_this_step = (
+                self.render and physics_step + 1 == self.physics_steps_per_action
+            )
+            self.sim.step(render=render_this_step)
+
         applied_command = torch.cat(
             (command_world_velocity, yaw_rate_command), dim=0
         )
@@ -478,10 +514,16 @@ class IsaacSingleDroneProbe:
         return {
             "passed": passed,
             "steps": steps,
-            "duration_s": steps * self.dt,
+            "duration_s": steps * self.control_dt,
             "wall_time_s": wall_time,
-            "sim_steps_per_second": steps / wall_time,
-            "real_time_factor": (steps * self.dt) / wall_time,
+            "control_steps_per_second": steps / wall_time,
+            "physics_steps_per_second": (
+                steps * self.physics_steps_per_action / wall_time
+            ),
+            "sim_steps_per_second": (
+                steps * self.physics_steps_per_action / wall_time
+            ),
+            "real_time_factor": (steps * self.control_dt) / wall_time,
             "max_position_error_m": max_position_error,
             "final_position_error_m": final_error,
             "max_speed_mps": max_speed,
@@ -593,8 +635,14 @@ class IsaacSingleDroneProbe:
             "passed": passed,
             "steps": steps,
             "wall_time_s": wall_time,
-            "sim_steps_per_second": steps / wall_time,
-            "real_time_factor": (steps * self.dt) / wall_time,
+            "control_steps_per_second": steps / wall_time,
+            "physics_steps_per_second": (
+                steps * self.physics_steps_per_action / wall_time
+            ),
+            "sim_steps_per_second": (
+                steps * self.physics_steps_per_action / wall_time
+            ),
+            "real_time_factor": (steps * self.control_dt) / wall_time,
             "warmup_steps": warmup_steps,
             "requested_max_speed_mps": requested_max_speed,
             "limited_max_speed_mps": limited_max_speed,
@@ -682,6 +730,10 @@ class IsaacSingleDroneProbe:
             "torch_version": torch.__version__,
             "cuda_available": torch.cuda.is_available(),
             "gpu_name": torch.cuda.get_device_name(self.device) if torch.cuda.is_available() else None,
-            "physics_dt_s": self.dt,
+            "physics_dt_s": self.physics_dt,
+            "physics_hz": 1.0 / self.physics_dt,
+            "control_dt_s": self.control_dt,
+            "control_hz": self.control_hz,
+            "physics_steps_per_action": self.physics_steps_per_action,
             "probes": probes,
         }

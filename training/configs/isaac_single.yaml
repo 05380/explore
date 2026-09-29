@@ -7,8 +7,10 @@ app:
   fast_shutdown: true
 
 sim:
-  physics_dt: 0.016
-  rendering_dt: 0.016
+  # 120 Hz rigid-body simulation. One policy action is held for six physics
+  # steps, yielding the 20 Hz control contract used by training/deployment.
+  physics_dt: 0.008333333333333333
+  rendering_dt: 0.05
   device: cuda:0
   params:
     gravity: [0.0, 0.0, -9.81]
@@ -52,11 +54,14 @@ drone:
 
 control:
   command_frame: yaw_local
+  control_hz: 20.0
+  physics_steps_per_action: 6
   max_speed_mps: 2.0
   max_yaw_rate_rps: 1.0
   max_acceleration_mps2: 2.0
   max_yaw_acceleration_rps2: 2.0
-  random_command_interval_steps: 125
+  # 40 control steps = 2 seconds at 20 Hz.
+  random_command_interval_steps: 40
   random_command_overspeed_factor: 1.5
   reference_boundary_margin_m: 1.0
 
@@ -67,10 +72,11 @@ collision:
 
 probe:
   seed: 0
-  hover_steps: 1000
+  # Probe step counts below are control steps, not raw physics steps.
+  hover_steps: 600
   random_steps: 1000
   reset_trials: 3
-  warmup_steps: 100
+  warmup_steps: 40
   print_interval_steps: 100
 
 acceptance:

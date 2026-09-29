@@ -72,6 +72,12 @@ def test_shipped_probe_configuration_is_valid():
     validate_probe_config(cfg)
     assert cfg["control"]["max_speed_mps"] == 2.0
     assert cfg["control"]["max_acceleration_mps2"] == 2.0
+    assert cfg["control"]["control_hz"] == 20.0
+    assert cfg["control"]["physics_steps_per_action"] == 6
+    assert (
+        cfg["sim"]["physics_dt"]
+        * cfg["control"]["physics_steps_per_action"]
+    ) == pytest.approx(1.0 / cfg["control"]["control_hz"])
     assert cfg["control"]["command_frame"] == "yaw_local"
     assert cfg["scene"]["size_m"] == [30.0, 30.0, 5.0]
     assert cfg["app"]["multi_gpu"] is False
