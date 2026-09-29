@@ -91,6 +91,8 @@ def test_shipped_probe_configuration_is_valid():
     assert cfg["camera"]["fixed_to_body"] is True
     assert cfg["camera"]["max_depth_m"] == 20.0
     assert cfg["camera"]["actor_resize"] == [64, 40]
+    assert cfg["camera"]["probe"]["pose_sync_control_steps"] == 1
+    assert cfg["acceptance"]["camera_pose_sync_yaw_abs_error_rad"] == 0.05
     assert cfg["navigation_backend"]["fixed_target_position_m"] == [2.5, 0.0, 1.5]
     assert cfg["navigation_backend"]["goal_position_tolerance_m"] == 0.5
 

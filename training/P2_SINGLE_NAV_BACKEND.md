@@ -18,6 +18,8 @@
 - candidate 0 对应该固定目标，其余 15 个槽位无效。
 - `decision_mask=0`，候选索引和残差分支不进入 PPO log-prob/entropy。
 - actor 只使用 `[vx_body, vy_body, vz_world, yaw_rate]` 四维动作。
+- actor 深度和近障奖励都使用已通过几何验收的 `distance_to_image_plane`；当前
+  Isaac 2023.1 的 `distance_to_camera` 只作诊断，不能直接混入 clearance 奖励。
 - 位置到达是 `navigation_reached`；只有位置、yaw、倾斜均合格且已读取新深度帧，
   才产生 `observation_completed/goal_reached`。
 - 当前没有体素地图，因此 coverage 和 coverage-target 指标保持 0；固定目标完成不能

@@ -119,6 +119,13 @@ def validate_probe_config(cfg: Mapping[str, Any]) -> None:
         raise ValueError("random_command_interval_steps must be at least one")
 
     validate_d455m_config(cfg["camera"])
+    camera_probe = cfg["camera"].get("probe", {})
+    if int(camera_probe.get("pose_sync_control_steps", 1)) < 1:
+        raise ValueError("camera.probe.pose_sync_control_steps must be at least one")
+    if float(cfg["acceptance"]["camera_pose_sync_yaw_abs_error_rad"]) <= 0.0:
+        raise ValueError(
+            "acceptance.camera_pose_sync_yaw_abs_error_rad must be positive"
+        )
 
     navigation = cfg["navigation_backend"]
     target = _require_vector(navigation, "fixed_target_position_m", 3)
@@ -893,15 +900,21 @@ class IsaacSingleDroneProbe:
         return matches[0]
 
     def _expected_camera_wall_depth(
-        self, obstacle: Mapping[str, Any], axis: int
+        self,
+        obstacle: Mapping[str, Any],
+        axis: int,
+        body_position_axis_m: float | None = None,
     ) -> float:
         camera_cfg = self.cfg["camera"]
         obstacle_near_face = float(obstacle["position_m"][axis]) - 0.5 * float(
             obstacle["size_m"][axis]
         )
         camera_forward_offset = float(camera_cfg["mount_position_body_m"][0])
-        spawn_axis = float(self.spawn_position.reshape(3)[axis].item())
-        return obstacle_near_face - spawn_axis - camera_forward_offset
+        if body_position_axis_m is None:
+            body_position_axis_m = float(
+                self.spawn_position.reshape(3)[axis].item()
+            )
+        return obstacle_near_face - body_position_axis_m - camera_forward_offset
 
     def run_camera(self) -> Dict[str, Any]:
         """Validate metric depth, 20 m clipping and fixed-body yaw behavior."""
@@ -930,6 +943,25 @@ class IsaacSingleDroneProbe:
 
         yaw_rad = float(probe_cfg["yaw_test_rad"])
         self.set_test_pose(self.spawn_position.reshape(3), yaw_rad)
+        # Tensor-API pose writes are immediately visible to PhysX queries, but
+        # Isaac Sim 2023.1 with flatcache/Fabric can keep the render camera on
+        # its previous transform until physics advances. A zero-command
+        # control step preserves the requested hover pose while publishing the
+        # new rigid-body transform to the renderer. Merely rendering more
+        # frames does not fix this stale-transform failure mode.
+        pose_sync_control_steps = int(probe_cfg.get("pose_sync_control_steps", 1))
+        pose_sync_start = time.perf_counter()
+        synchronized_telemetry = self.telemetry()
+        for _ in range(pose_sync_control_steps):
+            synchronized_telemetry, _ = self.step((0.0, 0.0, 0.0, 0.0))
+        pose_sync_wall_time = time.perf_counter() - pose_sync_start
+        actual_yaw_rad = float(synchronized_telemetry["yaw_rad"])
+        pose_sync_yaw_error = abs(
+            math.atan2(
+                math.sin(actual_yaw_rad - yaw_rad),
+                math.cos(actual_yaw_rad - yaw_rad),
+            )
+        )
         yaw_obstacle = self._obstacle_by_name(str(probe_cfg["yaw_obstacle"]))
         yaw_capture_start = time.perf_counter()
         yaw_depth = self.depth_camera.capture()
@@ -940,7 +972,11 @@ class IsaacSingleDroneProbe:
             float(camera_cfg["max_depth_m"]),
             int(probe_cfg["center_patch_px"]),
         )
-        yaw_expected = self._expected_camera_wall_depth(yaw_obstacle, axis=1)
+        yaw_expected = self._expected_camera_wall_depth(
+            yaw_obstacle,
+            axis=1,
+            body_position_axis_m=float(synchronized_telemetry["position_m"][1]),
+        )
 
         normalized, valid = depth_to_normalized_inverse(
             front_depth["distance_to_image_plane"],
@@ -955,6 +991,9 @@ class IsaacSingleDroneProbe:
         )
 
         tolerance = float(acceptance["camera_center_depth_abs_error_m"])
+        pose_sync_yaw_tolerance = float(
+            acceptance["camera_pose_sync_yaw_abs_error_rad"]
+        )
         minimum_valid = float(acceptance["camera_min_range_valid_fraction"])
         front_median = front_plane["center_median_m"]
         yaw_median = yaw_plane["center_median_m"]
@@ -989,6 +1028,10 @@ class IsaacSingleDroneProbe:
             and float(yaw_plane["range_valid_fraction"]) >= minimum_valid
             and front_error <= tolerance
             and yaw_error <= tolerance
+            and bool(synchronized_telemetry["finite"])
+            and not bool(synchronized_telemetry["collision"])
+            and not bool(synchronized_telemetry["out_of_bounds"])
+            and pose_sync_yaw_error <= pose_sync_yaw_tolerance
             and depth_within_clipping_range
             and tuple(actor_depth.shape) == (actor_height, actor_width)
             and bool(torch.isfinite(actor_depth).all().item())
@@ -1023,6 +1066,18 @@ class IsaacSingleDroneProbe:
             },
             "yaw_follow": {
                 "yaw_test_rad": yaw_rad,
+                "actual_body_yaw_rad": actual_yaw_rad,
+                "body_yaw_abs_error_rad": pose_sync_yaw_error,
+                "body_yaw_tolerance_rad": pose_sync_yaw_tolerance,
+                "pose_sync_control_steps": pose_sync_control_steps,
+                "pose_sync_wall_time_s": pose_sync_wall_time,
+                "synchronized_position_m": synchronized_telemetry["position_m"],
+                "synchronized_speed_mps": synchronized_telemetry["speed_mps"],
+                "synchronized_finite": synchronized_telemetry["finite"],
+                "synchronized_collision": synchronized_telemetry["collision"],
+                "synchronized_out_of_bounds": synchronized_telemetry[
+                    "out_of_bounds"
+                ],
                 "obstacle": str(yaw_obstacle["name"]),
                 "expected_center_depth_m": yaw_expected,
                 "center_depth_abs_error_m": yaw_error_value,

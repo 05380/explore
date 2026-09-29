@@ -21,6 +21,9 @@ base_link 固定外参 -> Isaac USD Camera -> Replicator metric depth
   不用双线性插值冲淡树干和墙边缘。
 - 探针先正向观察 `contact_wall`，再把机体偏航 90° 观察 `wall_north`；两次中心
   深度都由场景几何和安装前向偏移推导，用于检查固定外参和偏航跟随。
+- 通过张量 API 瞬移偏航后先执行 1 个零指令控制周期，让 PhysX/Fabric 把新的
+  `base_link` 姿态传播给固定子相机；报告会独立检查实际机体 yaw，避免把旧图误判成
+  相机外参错误。
 - 每次读取前渲染 8 帧，规避 Isaac Sim 2023.1 reset 后前几帧可能陈旧的问题。
 
 当前安装位置 `[0.25, 0, 0] m` 和仓库中的内参仍是仿真假设，不是真机标定结果。
@@ -77,6 +80,7 @@ P1_PROBE_ENV_CLOSED
 - 正向墙中心深度约为 `4.0 - 0.5 - 0.25 = 3.25 m`；
 - 偏航后北墙中心深度约为 `6.0 - 0.4 - 0.25 = 5.35 m`；
 - 两次绝对误差均不超过 0.30 m；
+- `yaw_follow.body_yaw_abs_error_rad <= 0.05`，且 `pose_sync_control_steps == 1`；
 - `depth_within_clipping_range=true`，inverse-depth 在 `[0,1]`；
 - `camera_prim_path` 位于 `.../Hummingbird_0/base_link/D455M`。
 - 记录 `render_frames_per_second` 作为单相机 headless 基线；它不是 16 机可达到的帧率。
@@ -95,11 +99,15 @@ echo $?
 
 - 深度全无效：先检查 headless RTX 是否启动、render product 是否创建，再检查相机
   OpenGL 光轴是否为机体 +X；不要先放宽验收阈值。
-- 正向深度正确、偏航深度错误：检查相机是否真的挂在 `base_link` 下，以及 reset/
-  teleport 后是否完成了 8 帧 renderer 刷新。
+- 正向深度正确、偏航深度仍等于正向旧帧：先看
+  `yaw_follow.body_yaw_abs_error_rad`。若机体 yaw 正确，检查 pose sync 控制步后 Fabric
+  是否更新了相机；单纯继续增加 renderer 帧数通常不能修复“物理姿态未传播”问题。
 - 两个深度都有固定偏差：核对安装位置、墙体半尺寸和 USD stage 单位是否为米。
 - 偶发读到上一姿态画面：把 `warmup_render_frames` 增至 12 或 16，并记录额外渲染
   成本；不能把旧帧当成新观测融合。
+- Isaac 2023.1 中 `distance_to_camera` 的裁剪语义可能与几何射线距离不一致；它目前
+  只保留为诊断输出。actor、建图输入和避障奖励安全距离统一使用已验收的
+  `distance_to_image_plane`，不能混用两种定义。
 - 相机探针通过但进程退出崩溃：确认日志先出现 `P1_PROBE_ENV_CLOSED`；随后检查
   annotator detach 与 Kit 版本，不应进入训练。
 

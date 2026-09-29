@@ -196,15 +196,20 @@ class IsaacSingleNavigationBackend:
             output_height=self.depth_height,
         ).to(self.device)
 
-        radial = torch.as_tensor(metric["distance_to_camera"], dtype=torch.float32)
-        radial_valid = (
-            torch.isfinite(radial)
-            & (radial >= float(self.camera_cfg["min_depth_m"]))
-            & (radial <= float(self.camera_cfg["max_depth_m"]))
+        # Use the same, geometrically validated axial depth that feeds the
+        # actor. Isaac Sim 2023.1's distance_to_camera annotator can have
+        # incompatible clipping semantics (for example reporting 2.35 m for a
+        # wall whose verified optical-axis depth is 3.25 m). The minimum axial
+        # depth is conservative off-axis and avoids mixing those conventions.
+        plane_metric = torch.as_tensor(plane, dtype=torch.float32)
+        plane_valid = (
+            torch.isfinite(plane_metric)
+            & (plane_metric >= float(self.camera_cfg["min_depth_m"]))
+            & (plane_metric <= float(self.camera_cfg["max_depth_m"]))
         )
         clearance = (
-            float(radial[radial_valid].min().item())
-            if bool(radial_valid.any())
+            float(plane_metric[plane_valid].min().item())
+            if bool(plane_valid.any())
             else float(self.camera_cfg["max_depth_m"])
         )
         self.last_clearance_m.fill_(clearance)
@@ -509,4 +514,3 @@ class IsaacSingleNavigationBackend:
             return
         self._closed = True
         self.probe.close()
-

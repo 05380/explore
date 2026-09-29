@@ -30,13 +30,14 @@ def load_isaac_config():
 class FakeDepthCamera:
     def __init__(self, cfg):
         self.cfg = cfg
+        self.plane_depth_m = 4.0
+        self.radial_depth_m = 4.0
 
     def capture(self, warmup_frames=None):
         shape = (int(self.cfg["height"]), int(self.cfg["width"]))
-        depth = torch.full(shape, 4.0)
         return {
-            "distance_to_image_plane": depth,
-            "distance_to_camera": depth,
+            "distance_to_image_plane": torch.full(shape, self.plane_depth_m),
+            "distance_to_camera": torch.full(shape, self.radial_depth_m),
         }
 
 
@@ -122,6 +123,14 @@ def test_world_to_yaw_local_uses_forward_left_up_convention():
     assert local.tolist() == pytest.approx([1.0, 0.0, 0.2], abs=1e-6)
 
 
+def test_backend_clearance_uses_validated_axial_depth_not_radial_annotator():
+    backend, probe = make_backend()
+    probe.depth_camera.plane_depth_m = 4.0
+    probe.depth_camera.radial_depth_m = 1.25
+    backend.reset()
+    assert backend.last_clearance_m.item() == pytest.approx(4.0)
+
+
 def test_single_navigation_backend_matches_rmappo_contract():
     backend, _ = make_backend()
     validate_backend_shapes(backend)
@@ -167,4 +176,3 @@ def test_navigation_reached_and_observation_completed_are_separate_events():
     assert info["navigation_reached"].item() == 1.0
     assert info["observation_completed"].item() == 1.0
     assert info["episode_success"].item() == 1.0
-

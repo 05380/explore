@@ -98,6 +98,9 @@ camera:
     front_obstacle: contact_wall
     yaw_test_rad: 1.5707963267948966
     yaw_obstacle: wall_north
+    # Tensor pose teleports must advance physics before Fabric propagates the
+    # base_link transform to the fixed child camera in Isaac Sim 2023.1.
+    pose_sync_control_steps: 1
 
 # First backend stage: a rule-provided target before the front wall. This only
 # validates the observation/action/reward/episode contract. The following
@@ -130,3 +133,4 @@ acceptance:
   random_max_actual_speed_mps: 3.00
   camera_center_depth_abs_error_m: 0.30
   camera_min_range_valid_fraction: 0.02
+  camera_pose_sync_yaw_abs_error_rad: 0.05
