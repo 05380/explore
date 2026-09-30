@@ -50,6 +50,48 @@ def _segment_intersects_box(
     return True
 
 
+def _expanded_box_size(size: Sequence[float], clearance_m: float) -> list[float]:
+    if clearance_m < 0.0 or not math.isfinite(clearance_m):
+        raise ValueError("path clearance must be a finite non-negative number")
+    return [float(value) + 2.0 * clearance_m for value in size]
+
+
+def _scenario_obstacles(isaac_cfg: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    obstacles = isaac_cfg["scene"].get("obstacles", [])
+    if not isinstance(obstacles, Sequence) or isinstance(obstacles, (str, bytes)):
+        raise ValueError("scene.obstacles must be a sequence")
+    return list(obstacles)
+
+
+def _find_obstacle(
+    isaac_cfg: Mapping[str, Any], obstacle_name: str
+) -> Mapping[str, Any] | None:
+    return next(
+        (
+            item
+            for item in _scenario_obstacles(isaac_cfg)
+            if str(item["name"]) == str(obstacle_name)
+        ),
+        None,
+    )
+
+
+def _segment_intersects_obstacle(
+    start: Sequence[float],
+    end: Sequence[float],
+    obstacle: Mapping[str, Any],
+    clearance_m: float = 0.0,
+) -> bool:
+    center = _vector(obstacle["position_m"], "obstacle position")
+    size = _vector(obstacle["size_m"], "obstacle size")
+    return _segment_intersects_box(
+        start,
+        end,
+        center,
+        _expanded_box_size(size, clearance_m),
+    )
+
+
 def validate_navigation_scenario(
     isaac_cfg: Mapping[str, Any], scenario_name: str
 ) -> None:
@@ -75,6 +117,62 @@ def validate_navigation_scenario(
         raise ValueError(f"scenario {scenario_name!r} target yaw must be finite")
     if float(scenario.get("episode_seconds", navigation["episode_seconds"])) <= 0.0:
         raise ValueError(f"scenario {scenario_name!r} episode_seconds must be positive")
+    rmappo_stage = scenario.get("rmappo_stage")
+    if not isinstance(rmappo_stage, str) or not rmappo_stage.strip():
+        raise ValueError(f"scenario {scenario_name!r} rmappo_stage must be non-empty")
+
+    path_clearance = float(scenario.get("path_clearance_m", 0.0))
+    if path_clearance < 0.0 or not math.isfinite(path_clearance):
+        raise ValueError(
+            f"scenario {scenario_name!r} path_clearance_m must be finite and non-negative"
+        )
+    direct_path_constraint = str(
+        scenario.get("direct_path_constraint", "any")
+    )
+    if direct_path_constraint not in {"any", "clear", "blocked"}:
+        raise ValueError(
+            f"scenario {scenario_name!r} direct_path_constraint must be "
+            "'any', 'clear', or 'blocked'"
+        )
+    spawn = _vector(isaac_cfg["scene"]["spawn_position_m"], "spawn position")
+    obstacles = _scenario_obstacles(isaac_cfg)
+    blocking_obstacle = None
+    if "blocking_obstacle" in scenario:
+        blocking_obstacle = _find_obstacle(
+            isaac_cfg, str(scenario["blocking_obstacle"])
+        )
+        if blocking_obstacle is None:
+            raise ValueError(
+                f"scenario {scenario_name!r} blocking_obstacle is not in the scene"
+            )
+    if direct_path_constraint == "blocked":
+        if blocking_obstacle is None:
+            raise ValueError(
+                f"scenario {scenario_name!r} requires a blocking_obstacle"
+            )
+        if not _segment_intersects_obstacle(
+            spawn, target, blocking_obstacle
+        ):
+            raise ValueError(
+                f"scenario {scenario_name!r} direct path does not cross its "
+                "blocking obstacle"
+            )
+    elif direct_path_constraint == "clear":
+        intersecting = [
+            str(obstacle["name"])
+            for obstacle in obstacles
+            if _segment_intersects_obstacle(
+                spawn,
+                target,
+                obstacle,
+                clearance_m=path_clearance,
+            )
+        ]
+        if intersecting:
+            raise ValueError(
+                f"scenario {scenario_name!r} direct path violates "
+                f"path_clearance_m at obstacles: {', '.join(intersecting)}"
+            )
 
     waypoints = scenario.get("validation_waypoints_m", [])
     for index, waypoint in enumerate(waypoints):
@@ -87,48 +185,42 @@ def validate_navigation_scenario(
             raise ValueError(
                 f"scenario {scenario_name!r} waypoint {index} is outside flight bounds"
             )
-    for key in (
-        "waypoint_position_tolerance_m",
-        "validation_position_gain",
-        "validation_yaw_gain",
-        "validation_cruise_speed_mps",
-        "validation_wall_visible_clearance_m",
-    ):
-        if float(scenario[key]) <= 0.0:
-            raise ValueError(f"scenario {scenario_name!r} {key} must be positive")
-    if int(scenario["validation_max_steps"]) < 1:
-        raise ValueError(
-            f"scenario {scenario_name!r} validation_max_steps must be positive"
-        )
-    obstacle = next(
-        (
-            item
-            for item in isaac_cfg["scene"].get("obstacles", [])
-            if str(item["name"]) == str(scenario["blocking_obstacle"])
-        ),
-        None,
-    )
-    if obstacle is None:
-        raise ValueError(
-            f"scenario {scenario_name!r} blocking_obstacle is not in the scene"
-        )
-    spawn = _vector(isaac_cfg["scene"]["spawn_position_m"], "spawn position")
-    obstacle_center = _vector(obstacle["position_m"], "blocking obstacle position")
-    obstacle_size = _vector(obstacle["size_m"], "blocking obstacle size")
-    if not _segment_intersects_box(spawn, target, obstacle_center, obstacle_size):
-        raise ValueError(
-            f"scenario {scenario_name!r} direct path does not cross its blocking obstacle"
-        )
-    validation_path = [spawn] + [
-        _vector(waypoint, "validation waypoint") for waypoint in waypoints
-    ] + [target]
-    if any(
-        _segment_intersects_box(start, end, obstacle_center, obstacle_size)
-        for start, end in zip(validation_path[:-1], validation_path[1:])
-    ):
-        raise ValueError(
-            f"scenario {scenario_name!r} validation waypoint path intersects the obstacle"
-        )
+    if waypoints:
+        for key in (
+            "waypoint_position_tolerance_m",
+            "validation_position_gain",
+            "validation_yaw_gain",
+            "validation_cruise_speed_mps",
+            "validation_wall_visible_clearance_m",
+        ):
+            if float(scenario[key]) <= 0.0:
+                raise ValueError(
+                    f"scenario {scenario_name!r} {key} must be positive"
+                )
+        if int(scenario["validation_max_steps"]) < 1:
+            raise ValueError(
+                f"scenario {scenario_name!r} validation_max_steps must be positive"
+            )
+        validation_path = [spawn] + [
+            _vector(waypoint, "validation waypoint") for waypoint in waypoints
+        ] + [target]
+        intersecting = {
+            str(obstacle["name"])
+            for start, end in zip(validation_path[:-1], validation_path[1:])
+            for obstacle in obstacles
+            if _segment_intersects_obstacle(
+                start,
+                end,
+                obstacle,
+                clearance_m=path_clearance,
+            )
+        }
+        if intersecting:
+            names = ", ".join(sorted(intersecting))
+            raise ValueError(
+                f"scenario {scenario_name!r} validation path violates "
+                f"path_clearance_m at obstacles: {names}"
+            )
 
 
 def apply_navigation_scenario(

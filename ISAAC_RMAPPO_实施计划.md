@@ -385,7 +385,7 @@ python training/scripts/eval_rmappo_isaac.py \
 
 - [x] 批次 A / P0：固定 GPU 环境；smoke 测试；定义配置/坐标/相机/终止合同；建立 Isaac 入口与诊断框架。
 - [x] 批次 B / P1：Ubuntu 单机物理、固定 D455M、metric/inverse-depth、相机随体偏航、接触、reset、backend 合同和连续 20 回合生命周期均已通过；20/20 成功、深度 reset MAE 约 `2.2e-5`、正常退出码 0。
-- [ ] 批次 C / P2：墙后目标场景、确定性绕墙探针、单机 Isaac PPO 训练/评估入口和动作分支禁用已实现；下一步先通过 [P3_SINGLE_WALL_PPO.md](training/P3_SINGLE_WALL_PPO.md) 的可达性与 1024 transition 连通性验收，再进行固定场景过拟合和未见布局评估。
+- [ ] 批次 C / P2：物理/相机/生命周期已验收；直接墙后训练的 10k checkpoint 确定性评估为 8/8 碰撞，已将同一环境拆为 `open_target → wall_edge → wall_avoidance` 三级课程。下一步按 [P3_SINGLE_WALL_PPO.md](training/P3_SINGLE_WALL_PPO.md) 从新 checkpoint 训练；三级都通过后再实现批量物理环境与程序化障碍。
 
 后续按 P3 建图 → P4 单机探索 → P5 两机协商通信 → P6 扩展 → P7 正式评估推进。阶段通过由数据决定，不预设“训练若干天必定成功”。
 

@@ -396,7 +396,15 @@ class RMAPPOTrainer:
         return self.save("checkpoint_final.pt")
 
     @torch.no_grad()
-    def evaluate(self, steps: int = 1024) -> Dict[str, float]:
+    def evaluate(
+        self,
+        steps: int = 1024,
+        progress_interval_steps: int = 0,
+    ) -> Dict[str, float]:
+        if steps < 1:
+            raise ValueError("steps must be positive")
+        if progress_interval_steps < 0:
+            raise ValueError("progress_interval_steps must be non-negative")
         observation, critic_state = self.backend.reset()
         hidden = self.actor.initial_hidden(
             self.backend.num_envs, self.backend.num_agents, self.device
@@ -406,6 +414,11 @@ class RMAPPOTrainer:
         goals = 0.0
         coverage = 0.0
         minimum_obstacle_clearance = math.inf
+        actual_speed_sum = 0.0
+        actual_speed_samples = 0
+        maximum_actual_speed = 0.0
+        minimum_target_distance = math.inf
+        final_target_distance = math.nan
         completed_episode_steps = 0.0
         episode_sums: Dict[str, float] = {
             key: 0.0
@@ -423,7 +436,8 @@ class RMAPPOTrainer:
                 "coverage_target_steps",
             )
         }
-        for _ in range(steps):
+        evaluation_start_time = time.monotonic()
+        for step_index in range(1, steps + 1):
             action, _, _, next_hidden = self.actor.step(observation, hidden, deterministic=True)
             observation, critic_state, reward, done, info = self.backend.step(action)
             validate_step_info(info, self.backend.num_envs)
@@ -438,6 +452,22 @@ class RMAPPOTrainer:
                     minimum_obstacle_clearance,
                     float(info["obstacle_clearance_m"].min()),
                 )
+            if "actual_speed_mps" in info:
+                actual_speed = float(info["actual_speed_mps"].mean())
+                actual_speed_sum += actual_speed
+                actual_speed_samples += 1
+                maximum_actual_speed = max(maximum_actual_speed, actual_speed)
+            else:
+                actual_speed = math.nan
+            if "target_distance_m" in info:
+                target_distance = float(info["target_distance_m"].mean())
+                minimum_target_distance = min(
+                    minimum_target_distance,
+                    float(info["target_distance_m"].min()),
+                )
+                final_target_distance = target_distance
+            else:
+                target_distance = math.nan
             if "episode_steps" in info:
                 completed_episode_steps += float(
                     (
@@ -447,6 +477,51 @@ class RMAPPOTrainer:
                 )
             for key in episode_sums:
                 episode_sums[key] += float(info[key].sum())
+            should_report_progress = progress_interval_steps > 0 and (
+                step_index == 1
+                or step_index % progress_interval_steps == 0
+                or step_index == steps
+            )
+            if should_report_progress:
+                elapsed_seconds = max(time.monotonic() - evaluation_start_time, 1.0e-9)
+                steps_per_second = step_index / elapsed_seconds
+                remaining_seconds = (
+                    (steps - step_index) / steps_per_second
+                    if steps_per_second > 0.0
+                    else math.inf
+                )
+                episode_count_so_far = episode_sums["episode_finished"]
+                success_rate_so_far = (
+                    episode_sums["episode_success"] / episode_count_so_far
+                    if episode_count_so_far > 0.0
+                    else 0.0
+                )
+                clearance_text = (
+                    f"{minimum_obstacle_clearance:.3f}"
+                    if math.isfinite(minimum_obstacle_clearance)
+                    else "n/a"
+                )
+                speed_text = (
+                    f"{actual_speed:.3f}" if math.isfinite(actual_speed) else "n/a"
+                )
+                target_distance_text = (
+                    f"{target_distance:.3f}"
+                    if math.isfinite(target_distance)
+                    else "n/a"
+                )
+                print(
+                    f"[eval] step={step_index}/{steps} "
+                    f"steps_per_second={steps_per_second:.2f} "
+                    f"eta_seconds={remaining_seconds:.1f} "
+                    f"episodes={episode_count_so_far:.0f} "
+                    f"success_rate={success_rate_so_far:.3f} "
+                    f"collision_step_rate={collisions / step_index:.4f} "
+                    f"reward_mean={reward_sum / step_index:.4f} "
+                    f"actual_speed_mps={speed_text} "
+                    f"target_distance_m={target_distance_text} "
+                    f"minimum_clearance_m={clearance_text}",
+                    flush=True,
+                )
         episode_count = episode_sums["episode_finished"]
         coverage_hits = episode_sums["coverage_target_reached"]
         result = {
@@ -459,6 +534,22 @@ class RMAPPOTrainer:
             "minimum_obstacle_clearance_m": (
                 minimum_obstacle_clearance
                 if math.isfinite(minimum_obstacle_clearance)
+                else 0.0
+            ),
+            "actual_speed_mps_mean": (
+                actual_speed_sum / actual_speed_samples
+                if actual_speed_samples > 0
+                else 0.0
+            ),
+            "actual_speed_mps_max": maximum_actual_speed,
+            "minimum_target_distance_m": (
+                minimum_target_distance
+                if math.isfinite(minimum_target_distance)
+                else 0.0
+            ),
+            "final_target_distance_m": (
+                final_target_distance
+                if math.isfinite(final_target_distance)
                 else 0.0
             ),
             "episode_duration_s_mean": (

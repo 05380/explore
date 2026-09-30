@@ -69,10 +69,12 @@ python training/scripts/eval_rmappo.py \
 配置真源为 `swarm_exploration/exploration_manager/config/rmappo_d455m_16.yaml`。建议逐阶段训练并使用前一阶段 checkpoint 初始化：
 
 1. `single_agent_sparse_static`：1 机，30×30×5 m；
-2. `single_agent_wall_avoidance`：1 机，固定墙后目标，仅训练低层导航；
-3. `four_agent_dense_static`：4 机，60×60×5 m；
-4. `eight_agent_comm_randomization`：8 机，100×100×5 m；
-5. `sixteen_agent_full`：16 机，150×150×5 m。
+2. `single_agent_open_target`：1 机，空旷近目标，学习跟踪、制动与 yaw；
+3. `single_agent_wall_edge`：1 机，沿墙边缘安全通过；
+4. `single_agent_wall_avoidance`：1 机，固定墙后目标，作为完整绕障验收；
+5. `four_agent_dense_static`：4 机，60×60×5 m；
+6. `eight_agent_comm_randomization`：8 机，100×100×5 m；
+7. `sixteen_agent_full`：16 机，150×150×5 m。
 
 每个规模内部再分三段更稳定：先固定候选 0 只训练低层避障；再冻结低层或降低其学习率，打开候选选择；最后两者联合微调。当前统一 trainer 已支持混合动作和事件 mask，但“冻结/分组学习率”尚未做成命令行选项，接 Isaac backend 时应补上。
 
@@ -80,8 +82,8 @@ python training/scripts/eval_rmappo.py \
 
 ```bash
 python training/scripts/train_isaac_single_ppo.py \
-  --headless --total-steps 1024 \
-  --output runs/isaac_single_wall/ppo_smoke
+  --scenario open_target --headless --total-steps 1024 \
+  --output runs/isaac_nav_curriculum/open
 ```
 
 当前入口严格限制为一个物理环境、一架无人机。后续 `num-envs` 表示并行编队数，不是无人机数；在实现批量物理场景和相机前不能只改参数宣称已经并行。

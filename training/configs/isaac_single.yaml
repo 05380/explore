@@ -137,14 +137,39 @@ navigation_backend:
     reset_center_inverse_depth_tolerance: 0.03
     max_torch_cuda_memory_growth_mib: 256.0
   scenarios:
+    open_target:
+      # Curriculum A: learn target tracking, braking and final yaw before a
+      # detour is required. The target remains local and its 0.5 m-inflated
+      # direct segment is clear of every configured obstacle.
+      rmappo_stage: single_agent_open_target
+      fixed_target_position_m: [2.0, -2.0, 1.8]
+      fixed_target_yaw_rad: 0.0
+      episode_seconds: 15.0
+      terminate_on_stall: true
+      direct_path_constraint: clear
+      path_clearance_m: 0.5
+    wall_edge:
+      # Curriculum B: the goal direction takes the vehicle past the south edge
+      # of contact_wall with only a narrow safety margin. This introduces wall
+      # appearance and lateral control without requiring discovery of a detour.
+      rmappo_stage: single_agent_wall_edge
+      fixed_target_position_m: [5.0, -3.5, 1.8]
+      fixed_target_yaw_rad: 0.0
+      episode_seconds: 20.0
+      terminate_on_stall: true
+      direct_path_constraint: clear
+      path_clearance_m: 0.5
     wall_avoidance:
       # The straight spawn-to-goal segment crosses contact_wall. PPO receives
       # only this final target; validation_waypoints_m are exclusively for the
       # deterministic reachability probe and are never part of observations.
+      rmappo_stage: single_agent_wall_avoidance
       fixed_target_position_m: [6.0, 0.0, 1.5]
       fixed_target_yaw_rad: 0.0
       episode_seconds: 30.0
       terminate_on_stall: true
+      direct_path_constraint: blocked
+      path_clearance_m: 0.5
       blocking_obstacle: contact_wall
       validation_waypoints_m:
         - [2.7, -2.7, 1.5]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -47,19 +48,37 @@ def test_contract_parameters_are_synchronized():
     assert check_contract(cfg)["valid"] is True
 
 
-def test_wall_avoidance_curriculum_and_isaac_scenario_are_explicit():
-    cfg = apply_curriculum_stage(load_config(), "single_agent_wall_avoidance")
-    assert cfg["experiment"]["num_agents"] == 1
-    assert cfg["training"]["curriculum_stage"] == "single_agent_wall_avoidance"
-
+def test_navigation_curriculum_and_isaac_scenarios_are_explicit():
     isaac_path = Path(__file__).resolve().parents[2] / "configs" / "isaac_single.yaml"
     import yaml
 
     base = yaml.safe_load(isaac_path.read_text(encoding="utf-8"))
-    active = apply_navigation_scenario(base, "wall_avoidance")
     assert base["navigation_backend"]["fixed_target_position_m"] == [2.5, 0.0, 1.5]
-    assert active["navigation_backend"]["fixed_target_position_m"] == [6.0, 0.0, 1.5]
-    assert active["navigation_backend"]["active_scenario"] == "wall_avoidance"
+    expected = {
+        "open_target": ("single_agent_open_target", [2.0, -2.0, 1.8]),
+        "wall_edge": ("single_agent_wall_edge", [5.0, -3.5, 1.8]),
+        "wall_avoidance": ("single_agent_wall_avoidance", [6.0, 0.0, 1.5]),
+    }
+    for scenario_name, (stage_name, target) in expected.items():
+        cfg = apply_curriculum_stage(load_config(), stage_name)
+        assert cfg["experiment"]["num_agents"] == 1
+        assert cfg["training"]["curriculum_stage"] == stage_name
+        active = apply_navigation_scenario(base, scenario_name)
+        assert active["navigation_backend"]["fixed_target_position_m"] == target
+        assert active["navigation_backend"]["active_scenario"] == scenario_name
+        assert (
+            active["navigation_backend"]["scenarios"][scenario_name][
+                "rmappo_stage"
+            ]
+            == stage_name
+        )
+
+    invalid = copy.deepcopy(base)
+    invalid["navigation_backend"]["scenarios"]["open_target"][
+        "fixed_target_position_m"
+    ] = [6.0, 0.0, 1.5]
+    with pytest.raises(ValueError, match="direct path violates"):
+        apply_navigation_scenario(invalid, "open_target")
 
 
 def test_actor_critic_shapes():

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train the shared RMAPPO actor on the P3 single-wall Isaac scenario."""
+"""Train the shared RMAPPO actor on one P3 Isaac navigation curriculum."""
 
 from __future__ import annotations
 
@@ -23,15 +23,19 @@ for source_root in (TRAINING_PACKAGE, OMNIDRONES_SOURCE):
         sys.path.insert(0, source_text)
 
 DEFAULT_ISAAC_CONFIG = TRAINING_ROOT / "configs" / "isaac_single.yaml"
-DEFAULT_OUTPUT = TRAINING_ROOT / "runs" / "isaac_single_wall" / "ppo"
+DEFAULT_OUTPUT = TRAINING_ROOT / "runs" / "isaac_nav_curriculum" / "open"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--isaac-config", type=Path, default=DEFAULT_ISAAC_CONFIG)
     parser.add_argument("--rmappo-config", type=Path, default=None)
-    parser.add_argument("--scenario", default="wall_avoidance")
-    parser.add_argument("--stage", default="single_agent_wall_avoidance")
+    parser.add_argument("--scenario", default="open_target")
+    parser.add_argument(
+        "--stage",
+        default=None,
+        help="Compatibility check; when set it must match the selected scenario.",
+    )
     parser.add_argument("--total-steps", type=int, default=1024)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--resume", type=Path, default=None)
@@ -88,8 +92,15 @@ def main() -> None:
         from racer_rmappo.trainer import RMAPPOTrainer
 
         isaac_cfg = apply_navigation_scenario(base_isaac_cfg, args.scenario)
+        scenario_cfg = isaac_cfg["navigation_backend"]["scenarios"][args.scenario]
+        stage_name = str(scenario_cfg["rmappo_stage"])
+        if args.stage is not None and args.stage != stage_name:
+            raise ValueError(
+                f"scenario {args.scenario!r} requires stage {stage_name!r}; "
+                f"received incompatible --stage {args.stage!r}"
+            )
         validate_probe_config(isaac_cfg)
-        cfg = apply_curriculum_stage(load_config(args.rmappo_config), args.stage)
+        cfg = apply_curriculum_stage(load_config(args.rmappo_config), stage_name)
         cfg["training"]["backend"] = "isaac"
         cfg["training"]["device"] = str(isaac_cfg["sim"]["device"])
         cfg["training"]["num_parallel_swarms"] = 1
@@ -101,7 +112,7 @@ def main() -> None:
 
         print(
             "P3_ISAAC_PPO_TRAIN_START "
-            f"scenario={args.scenario} stage={args.stage} "
+            f"scenario={args.scenario} stage={stage_name} "
             f"steps={args.total_steps} device={cfg['training']['device']} "
             f"headless={headless} output={output_dir}",
             flush=True,

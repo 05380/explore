@@ -165,6 +165,12 @@ curriculum:
   - name: single_agent_sparse_static
     agents: 1
     world_size_m: [30.0, 30.0, 5.0]
+  - name: single_agent_open_target
+    agents: 1
+    world_size_m: [30.0, 30.0, 5.0]
+  - name: single_agent_wall_edge
+    agents: 1
+    world_size_m: [30.0, 30.0, 5.0]
   - name: single_agent_wall_avoidance
     agents: 1
     world_size_m: [30.0, 30.0, 5.0]
