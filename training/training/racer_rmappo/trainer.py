@@ -400,6 +400,7 @@ class RMAPPOTrainer:
         self,
         steps: int = 1024,
         progress_interval_steps: int = 0,
+        step_callback=None,
     ) -> Dict[str, float]:
         if steps < 1:
             raise ValueError("steps must be positive")
@@ -477,6 +478,9 @@ class RMAPPOTrainer:
                 )
             for key in episode_sums:
                 episode_sums[key] += float(info[key].sum())
+            if step_callback is not None:
+                # Terminal state must come from info, never the auto-reset obs.
+                step_callback(step_index, info)
             should_report_progress = progress_interval_steps > 0 and (
                 step_index == 1
                 or step_index % progress_interval_steps == 0

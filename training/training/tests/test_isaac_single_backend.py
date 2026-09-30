@@ -124,6 +124,25 @@ def make_backend():
     return IsaacSingleNavigationBackend(cfg, isaac_cfg, probe), probe
 
 
+def test_diagnostic_snapshot_keeps_terminal_pose_before_auto_reset():
+    backend, probe = make_backend()
+    backend.collect_diagnostics = True
+    backend.reset()
+    backend.max_steps = 1
+    action = torch.zeros(1, 1, 9)
+    action[..., 0] = .25
+    _, _, _, done, info = backend.step(action)
+    snap = info["diagnostic_snapshot"]
+    assert done.item()
+    assert snap["done"] and snap["timeout"]
+    assert snap["position_m"][0] > 0
+    assert probe.position[0] == 0  # The actual backend has already reset.
+    assert snap["actual_speed_mps"] > 0
+    assert snap["depth"]["valid_fraction"] == 1.0
+    assert snap["episode_step"] == 1
+    backend.close()
+
+
 def test_navigation_action_scaling_is_asymmetric_and_norm_limited():
     cfg = load_config()
     limits = cfg["action"]["physical_limits"]

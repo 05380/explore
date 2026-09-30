@@ -89,6 +89,9 @@ class IsaacSingleNavigationBackend:
         self.cfg = cfg
         self.isaac_cfg = isaac_cfg
         self.probe = probe
+        # Opt-in evaluation telemetry. Never changes the policy observation.
+        self.collect_diagnostics = False
+        self.last_depth_summary = {}
         self.device = torch.device(probe.device)
         self.num_envs = 1
         self.num_agents = 1
@@ -216,6 +219,15 @@ class IsaacSingleNavigationBackend:
             else float(self.camera_cfg["max_depth_m"])
         )
         self.last_clearance_m.fill_(clearance)
+        if self.collect_diagnostics:
+            self.last_depth_summary = {
+                "valid_fraction": float(plane_valid.float().mean()),
+                "too_near_fraction": float(
+                    (torch.isfinite(plane_metric) & (plane_metric > 0.0)
+                     & (plane_metric < float(self.camera_cfg["min_depth_m"]))).float().mean()
+                ),
+                "sensor_min_axial_depth_m": clearance,
+            }
         return actor_depth
 
     def _update_depth_stack(self, newest: Tensor, reset: bool = False) -> None:
@@ -383,7 +395,7 @@ class IsaacSingleNavigationBackend:
         _, _, old_distance, _, _, _, _ = self._relative_target(
             self.last_telemetry
         )
-        telemetry, _ = self.probe.step(command)
+        telemetry, applied_command = self.probe.step(command)
         self.last_telemetry = telemetry
         self.step_count += 1
         newest = self._capture_actor_depth(1)
@@ -523,6 +535,42 @@ class IsaacSingleNavigationBackend:
                 [float(self.step_count)], device=self.device
             ),
         }
+
+        if self.collect_diagnostics:
+            # Capture BEFORE auto-reset: last_telemetry/probe state will describe
+            # the next episode once step() returns on a terminal transition.
+            reference = getattr(self.probe, "target_position", None)
+            info["diagnostic_snapshot"] = {
+                "episode_step": self.step_count,
+                "position_m": list(telemetry["position_m"]),
+                "orientation_wxyz": list(telemetry["orientation_wxyz"]),
+                "velocity_world_mps": list(telemetry["linear_velocity_mps"]),
+                "actual_speed_mps": float(telemetry["speed_mps"]),
+                "rpy_rad": [float(roll), float(pitch), float(telemetry["yaw_rad"])],
+                "target_position_m": self.target_position.detach().cpu().tolist(),
+                "target_distance_m": float(new_distance),
+                "target_yaw_error_rad": float(yaw_error),
+                "body_tilt_rad": float(tilt),
+                "navigation_reached": bool(navigation_reached),
+                "observation_completed": bool(observation_completed),
+                "action_navigation": bounded_navigation.reshape(4).detach().cpu().tolist(),
+                "command_body": command.detach().cpu().tolist(),
+                "applied_command_world": applied_command.reshape(4).detach().cpu().tolist(),
+                "controller_reference_position_m": (
+                    reference.reshape(3).detach().cpu().tolist() if reference is not None else None
+                ),
+                "depth": dict(self.last_depth_summary),
+                "max_contact_force_n": float(telemetry["max_contact_force_n"]),
+                "reward": float(reward.item()),
+                "reward_components": {key: float(value.item()) for key, value in components.items()},
+                "done": done_value,
+                "success": success,
+                "collision": collision,
+                "out_of_bounds": out_of_bounds,
+                "stall": stall,
+                "timeout": timeout,
+                "safety_takeover": safety_takeover,
+            }
 
         if done_value:
             observation, critic_state = self.reset()

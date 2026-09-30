@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate a P3 single-wall checkpoint using deterministic actor actions."""
+"""Evaluate a navigation checkpoint with optional Isaac overlays and traces."""
 
 from __future__ import annotations
 
@@ -47,6 +47,10 @@ def parse_args() -> argparse.Namespace:
         help="Print evaluation progress every N control steps; use 0 to disable.",
     )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--visualize", action="store_true", help="Isaac Debug Draw + status HUD; requires --no-headless")
+    parser.add_argument("--view", choices=("overview", "top", "follow"), default="overview")
+    parser.add_argument("--draw-every", type=int, default=5, help="Redraw overlays every N control steps")
+    parser.add_argument("--trace", type=Path, default=None, help="Per-step JSONL, also works headless")
     parser.add_argument(
         "--headless", action=argparse.BooleanOptionalAction, default=None
     )
@@ -59,6 +63,8 @@ def main() -> None:
         raise ValueError("--steps must be positive")
     if args.progress_interval < 0:
         raise ValueError("--progress-interval must be non-negative")
+    if args.draw_every < 1:
+        raise ValueError("--draw-every must be positive")
     checkpoint_path = args.checkpoint.expanduser().resolve()
     isaac_config_path = args.isaac_config.expanduser().resolve()
     output_path = args.output.expanduser().resolve()
@@ -73,11 +79,21 @@ def main() -> None:
     headless = (
         bool(app_cfg["headless"]) if args.headless is None else bool(args.headless)
     )
+    if args.visualize and headless:
+        raise ValueError("--visualize requires --no-headless and a working desktop/display")
+    trace_path = args.trace
+    if args.visualize and trace_path is None:
+        trace_path = output_path.with_suffix(".trace.jsonl")
+    if trace_path is not None:
+        trace_path = trace_path.expanduser().resolve()
+        if trace_path in (output_path, checkpoint_path, isaac_config_path):
+            raise ValueError("--trace must differ from report/checkpoint/config paths")
     simulation_app = None
     probe = None
     backend = None
     trainer = None
     result = None
+    recorder = None
     backend_close_failed = False
     try:
         from omni.isaac.kit import SimulationApp
@@ -126,12 +142,22 @@ def main() -> None:
         )
         probe = IsaacSingleDroneProbe(isaac_cfg, render=not headless)
         backend = IsaacSingleNavigationBackend(cfg, isaac_cfg, probe)
+        backend.collect_diagnostics = trace_path is not None
         trainer = RMAPPOTrainer(cfg, backend=backend)
         trainer.load(checkpoint_path, load_optimizer=False)
+        if trace_path is not None:
+            from racer_rmappo.eval_visualization import EvaluationTrace
+            recorder = EvaluationTrace(trace_path, isaac_cfg, checkpoint_path, args.scenario)
+            if args.visualize:
+                recorder.enable_viewer(probe, view=args.view, draw_every=args.draw_every)
+            print(f"P3_EVAL_TRACE={recorder.path}", flush=True)
         result = trainer.evaluate(
             args.steps,
             progress_interval_steps=args.progress_interval,
+            step_callback=recorder,
         )
+        if recorder is not None:
+            result["diagnostics"] = recorder.summary()
         result.update(
             {
                 "schema_version": 1,
@@ -156,6 +182,14 @@ def main() -> None:
         traceback.print_exc()
         raise
     finally:
+        if recorder is not None:
+            try:
+                recorder.close()
+            except BaseException:
+                backend_close_failed = True
+                print("P3_ISAAC_PPO_EVAL_VIEWER_CLOSE_EXCEPTION", flush=True)
+                traceback.print_exc()
+            recorder = None
         if trainer is not None:
             trainer.backend = None
         trainer = None
