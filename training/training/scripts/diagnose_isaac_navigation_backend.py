@@ -103,7 +103,7 @@ def main() -> None:
         backend = IsaacSingleNavigationBackend(rmappo_cfg, isaac_cfg, probe)
         observation, critic_state = validate_backend_shapes(backend)
 
-        action = torch.zeros(1, 1, 9, device=backend.device)
+        action = torch.zeros(1, 1, backend.action_dim, device=backend.device)
         action[..., 0] = float(args.forward_action)
         reward_sum = 0.0
         reward_min = float("inf")
@@ -154,7 +154,7 @@ def main() -> None:
             and safety_takeover_steps == 0
             and tuple(observation["depth"].shape) == (1, 1, 3, 40, 64)
             and tuple(critic_state.shape) == (1, 1, 13)
-            and bool((observation["decision_mask"] == 0.0).all().item())
+            and set(observation) == {"depth", "ego", "target", "neighbors"}
         )
         report = {
             "schema_version": 1,

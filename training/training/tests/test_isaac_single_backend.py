@@ -129,7 +129,7 @@ def test_diagnostic_snapshot_keeps_terminal_pose_before_auto_reset():
     backend.collect_diagnostics = True
     backend.reset()
     backend.max_steps = 1
-    action = torch.zeros(1, 1, 9)
+    action = torch.zeros(1, 1, 4)
     action[..., 0] = .25
     _, _, _, done, info = backend.step(action)
     snap = info["diagnostic_snapshot"]
@@ -178,7 +178,7 @@ def test_wall_validation_waypoint_produces_navigation_only_action():
         yaw_gain=1.5,
         max_cruise_speed_mps=0.8,
     )
-    assert action.shape == (1, 1, 9)
+    assert action.shape == (1, 1, 4)
     assert action[0, 0, 0].item() > 0.0
     assert action[0, 0, 1].item() < 0.0
     assert action[0, 0, 3].item() < 0.0
@@ -212,13 +212,10 @@ def test_single_navigation_backend_matches_rmappo_contract():
     assert observation["ego"].shape == (1, 1, 11)
     assert observation["target"].shape == (1, 1, 7)
     assert observation["neighbors"].shape == (1, 1, 5, 8)
-    assert observation["candidates"].shape == (1, 1, 16, 9)
-    assert observation["candidates"][0, 0, 0, -1].item() == 1.0
-    assert observation["candidates"][0, 0, 1:, -1].sum().item() == 0.0
-    assert observation["decision_mask"].item() == 0.0
+    assert set(observation) == {"depth", "ego", "target", "neighbors"}
     assert critic.shape == (1, 1, 13)
 
-    action = torch.zeros(1, 1, 9)
+    action = torch.zeros(1, 1, 4)
     action[..., 0] = 0.25
     next_observation, next_critic, reward, done, info = backend.step(action)
     validate_step_info(info, 1)
@@ -250,7 +247,9 @@ def test_rule_controller_completes_episode_and_backend_auto_resets():
 
     assert final_info is not None
     assert final_info["episode_success"].item() == 1.0
-    assert final_info["observation_completed"].item() == 1.0
+    assert final_info["navigation_pose_reached"].item() == 1.0
+    assert final_info["new_frame_processed"].item() == 1.0
+    assert final_info["observation_completed"].item() == 0.0
     assert backend.step_count == 0
     assert backend.last_telemetry["position_m"] == pytest.approx(
         probe.position.tolist(), abs=1e-6
@@ -263,7 +262,7 @@ def test_navigation_reached_and_observation_completed_are_separate_events():
     backend.target_position.copy_(probe.position)
     backend.target_yaw.fill_(math.pi)
 
-    action = torch.zeros(1, 1, 9)
+    action = torch.zeros(1, 1, 4)
     _, _, _, done, info = backend.step(action)
     assert done.item() is False
     assert info["navigation_reached"].item() == 1.0
@@ -274,5 +273,32 @@ def test_navigation_reached_and_observation_completed_are_separate_events():
     _, _, _, done, info = backend.step(action)
     assert done.item() is True
     assert info["navigation_reached"].item() == 1.0
-    assert info["observation_completed"].item() == 1.0
+    assert info["navigation_pose_reached"].item() == 1.0
+    assert info["observation_completed"].item() == 0.0
     assert info["episode_success"].item() == 1.0
+
+
+def test_goal_switch_publishes_after_reward_without_fake_progress():
+    from racer_rmappo.rule_goals import LocalGoal
+    backend, probe = make_backend()
+    backend.reset()
+    backend.queue_local_goal(LocalGoal("new", (0., 3., 1.5), 0., "test", switch_reason="invalid"))
+    obs, _, _, done, info = backend.step(torch.zeros(1, 1, 4))
+    assert not done.item()
+    assert info["reward_components"]["target_progress"].item() == pytest.approx(0)
+    assert backend.local_goal.goal_id == "new"
+    assert obs["target"][0, 0, 1].item() > 0
+    assert len(backend.position_history) == 1
+    _, _, _, _, info = backend.step(torch.zeros(1, 1, 4))
+    assert info["reward_components"]["target_progress"].item() == pytest.approx(0)
+
+
+def test_legacy_backend_is_explicit_and_new_backend_rejects_nine_fields():
+    backend, probe = make_backend()
+    with pytest.raises(ValueError, match="navigation_v2"):
+        backend.step(torch.zeros(1, 1, 9))
+    cfg = dict(backend.cfg, policy={"version": "hybrid_v1"})
+    old = IsaacSingleNavigationBackend(cfg, load_isaac_config(), probe)
+    obs, _ = old.reset()
+    assert obs["decision_mask"].item() == 0
+    old.step(torch.zeros(1, 1, 9))

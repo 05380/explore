@@ -41,7 +41,7 @@ class DepthEncoder(nn.Module):
 
 
 class SharedRecurrentActor(nn.Module):
-    """One actor shared by every UAV; execution needs no centralized state."""
+    """Historical hybrid_v1 actor, retained for checkpoint evaluation only."""
 
     def __init__(
         self,
@@ -228,6 +228,58 @@ class SharedRecurrentActor(nn.Module):
             log_probs.append(log_prob)
             entropies.append(entropy)
         return torch.stack(log_probs), torch.stack(entropies)
+
+
+class NavigationRecurrentActor(nn.Module):
+    """Navigation-only v2. No candidate features, selection or residual heads."""
+
+    initial_hidden = SharedRecurrentActor.initial_hidden
+    _distribution = SharedRecurrentActor._distribution
+    _squashed_log_prob = staticmethod(SharedRecurrentActor._squashed_log_prob)
+    evaluate_sequence = SharedRecurrentActor.evaluate_sequence
+
+    def __init__(self, frame_stack=3, hidden_size=256):
+        super().__init__()
+        self.hidden_size, self.action_dim = hidden_size, 4
+        self.depth_encoder = DepthEncoder(frame_stack, 128)
+        self.ego_target_encoder = nn.Sequential(nn.Linear(18, 96), nn.LayerNorm(96), nn.ELU())
+        self.neighbor_encoder = nn.Sequential(nn.Linear(8, 64), nn.ELU(), nn.Linear(64, 64), nn.ELU())
+        self.fusion = nn.Sequential(nn.Linear(288, hidden_size), nn.LayerNorm(hidden_size), nn.ELU())
+        self.gru = nn.GRUCell(hidden_size, hidden_size)
+        self.action_mean = nn.Linear(hidden_size, 4)
+        self.log_std = nn.Parameter(torch.full((4,), -0.5))
+        self.apply(_orthogonal_init)
+        nn.init.orthogonal_(self.action_mean.weight, 0.01)
+
+    def _next_hidden(self, observation, hidden):
+        depth = observation["depth"]
+        leading = depth.shape[:-3]
+        visual = self.depth_encoder(depth.reshape(-1, *depth.shape[-3:])).reshape(*leading, -1)
+        ego = self.ego_target_encoder(torch.cat((observation["ego"], observation["target"]), -1))
+        neighbors = observation["neighbors"]
+        features = self.neighbor_encoder(neighbors)
+        valid = neighbors[..., -1:] > 0.5
+        pooled = features.masked_fill(~valid, torch.finfo(features.dtype).min).max(-2).values
+        pooled = torch.where(valid.any(-2), pooled, torch.zeros_like(pooled))
+        fused = self.fusion(torch.cat((visual, ego, pooled), -1))
+        return self.gru(fused.reshape(-1, self.hidden_size), hidden.reshape(-1, self.hidden_size)).reshape(*leading, self.hidden_size)
+
+    def step(self, observation, hidden, deterministic=False):
+        next_hidden = self._next_hidden(observation, hidden)
+        distribution = self._distribution(next_hidden)
+        raw = distribution.mean if deterministic else distribution.rsample()
+        action = torch.tanh(raw)
+        return (action, self._squashed_log_prob(distribution, raw, action),
+                distribution.entropy().sum(-1), next_hidden)
+
+    def evaluate_actions(self, observation, hidden, actions):
+        if actions.shape[-1] != 4:
+            raise ValueError("navigation_v2 requires exactly four action fields")
+        next_hidden = self._next_hidden(observation, hidden)
+        distribution = self._distribution(next_hidden)
+        bounded = actions.clamp(-1.0+1e-6, 1.0-1e-6)
+        return (self._squashed_log_prob(distribution, torch.atanh(bounded), bounded),
+                distribution.entropy().sum(-1), next_hidden)
 
 
 class CentralizedCritic(nn.Module):

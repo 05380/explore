@@ -1,8 +1,8 @@
 """Interface contract for the high-fidelity Isaac Sim backend.
 
 The old ``scripts/env.py`` is a single-drone LiDAR environment and must not be
-silently used for RACER RMAPPO.  A future Isaac backend must expose this exact
-shape contract so the tested trainer can be reused unchanged.
+silently used for RACER RMAPPO. The current single-drone backend and future
+multi-drone backend share this versioned shape contract.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Dict, Protocol, Tuple
 
 from torch import Tensor
+from .policy_contract import NAVIGATION, policy_spec
 
 
 REQUIRED_STEP_INFO = {
@@ -45,7 +46,7 @@ class MultiUAVBackend(Protocol):
     def reset(self) -> Tuple[Dict[str, Tensor], Tensor]: ...
 
     def step(
-        self, hybrid_action: Tensor
+        self, action: Tensor
     ) -> Tuple[Dict[str, Tensor], Tensor, Tensor, Tensor, Dict[str, object]]: ...
 
 
@@ -56,7 +57,7 @@ def validate_backend_shapes(
     expected = (backend.num_envs, backend.num_agents)
     if tuple(critic_state.shape[:2]) != expected:
         raise ValueError(f"critic state starts with {critic_state.shape[:2]}, expected {expected}")
-    required = {"depth", "ego", "target", "neighbors", "candidates", "decision_mask"}
+    required = set(policy_spec(getattr(backend, "policy_version", NAVIGATION))["observation_keys"])
     if set(observation) != required:
         raise ValueError(f"observation keys must be {sorted(required)}, got {sorted(observation)}")
     for key, value in observation.items():

@@ -15,6 +15,8 @@ if str(TRAINING_PACKAGE) not in sys.path:
 
 from racer_rmappo.config import apply_curriculum_stage, load_config
 from racer_rmappo.trainer import RMAPPOTrainer
+from racer_rmappo.policy_contract import checkpoint_policy
+import torch
 
 
 def main() -> None:
@@ -27,6 +29,9 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=1024)
     args = parser.parse_args()
     cfg = apply_curriculum_stage(load_config(args.config), args.stage)
+    saved = torch.load(args.checkpoint.expanduser(), map_location="cpu")
+    cfg["policy"] = {"version": checkpoint_policy(saved)}
+    cfg["ppo"]["recurrent_hidden_size"] = saved["config"]["ppo"]["recurrent_hidden_size"]
     if args.device:
         cfg["training"]["device"] = args.device
     if args.num_envs:

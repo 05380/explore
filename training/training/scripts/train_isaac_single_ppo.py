@@ -23,7 +23,7 @@ for source_root in (TRAINING_PACKAGE, OMNIDRONES_SOURCE):
         sys.path.insert(0, source_text)
 
 DEFAULT_ISAAC_CONFIG = TRAINING_ROOT / "configs" / "isaac_single.yaml"
-DEFAULT_OUTPUT = TRAINING_ROOT / "runs" / "isaac_nav_curriculum" / "open"
+DEFAULT_OUTPUT = TRAINING_ROOT / "runs" / "isaac_navigation_v2" / "open"
 
 
 def parse_args() -> argparse.Namespace:

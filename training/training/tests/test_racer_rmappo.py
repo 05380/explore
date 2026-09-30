@@ -28,6 +28,8 @@ from check_ros_training_config import check_contract
 
 def small_config():
     cfg = apply_curriculum_stage(load_config(), "four_agent_dense_static")
+    # Historical hybrid checkpoints retain an explicit evaluation contract.
+    cfg["policy"] = {"version": "hybrid_v1"}
     cfg["training"]["num_parallel_swarms"] = 2
     cfg["training"]["smoke_max_obstacles"] = 3
     cfg["training"]["smoke_episode_steps"] = 8
@@ -158,6 +160,7 @@ def test_body_fixed_camera_frustum_updates_seen_voxels():
 
 def test_viewpoint_requires_position_and_body_yaw():
     cfg = apply_curriculum_stage(load_config(), "single_agent_sparse_static")
+    cfg["policy"] = {"version": "hybrid_v1"}
     cfg["training"]["num_parallel_swarms"] = 1
     cfg["training"]["smoke_max_obstacles"] = 1
     cfg["training"]["coverage_success_threshold"] = 1.0
@@ -189,7 +192,7 @@ def test_episode_metrics_separate_collision_causes():
     env.obstacle_position[0, 0] = env.positions[0, 0, :2]
     env.obstacle_radius[0, 0] = 1.0
     env.obstacle_height[0, 0] = 3.0
-    action = torch.zeros(1, 1, 9)
+    action = torch.zeros(1, 1, 4)
     _, _, _, done, info = env.step(action)
     assert done.item() is True
     assert info["episode_finished"].item() == 1.0

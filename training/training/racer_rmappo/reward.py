@@ -9,8 +9,9 @@ from torch import Tensor
 
 
 class RewardComposer:
-    def __init__(self, cfg: Mapping[str, object]) -> None:
+    def __init__(self, cfg: Mapping[str, object], navigation_only: bool = False) -> None:
         self.cfg = cfg
+        self.navigation_only = navigation_only
 
     @staticmethod
     def _capped_count(count: Tensor, coefficient: float, cap: float) -> Tensor:
@@ -80,5 +81,10 @@ class RewardComposer:
                 "viewpoint_gain_prior", torch.zeros_like(progress)
             ) * float(cfg.get("viewpoint_visible_gain_prior", 0.0)),
         }
+        if self.navigation_only:
+            # No selection prior and no simulated exploration incentives in v2.
+            for key in ("viewpoint_gain_prior", "local_new_voxels", "team_new_voxels",
+                        "duplicate_voxels", "coverage_milestone"):
+                components[key] = torch.zeros_like(progress)
         reward = torch.stack(tuple(components.values())).sum(dim=0)
         return reward, components

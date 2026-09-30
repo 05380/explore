@@ -1,5 +1,9 @@
 # RACER + 共享 RMAPPO + D455M 改造说明
 
+> 2026-09-30：本文件主要归档历史 ROS/九维混合策略改造。当前 Isaac 主线已改为规则选局部目标、
+> navigation_v2 四维 PPO 避障；不再训练候选头或目标残差，也不要求 ROS。最新实现与验收见
+> [navigation_v2](training/NAVIGATION_V2.md) 和 [实施计划](ISAAC_RMAPPO_实施计划.md)。历史 ROS C++ 接口本轮不改。
+
 ## 1. 结论与系统边界
 
 本次采用的结构是：

@@ -68,6 +68,8 @@ def main() -> None:
     checkpoint_path = args.checkpoint.expanduser().resolve()
     isaac_config_path = args.isaac_config.expanduser().resolve()
     output_path = args.output.expanduser().resolve()
+    if output_path in (checkpoint_path, isaac_config_path):
+        raise ValueError("report path must not overwrite the checkpoint or Isaac config")
     base_isaac_cfg = yaml.safe_load(
         isaac_config_path.read_text(encoding="utf-8")
     )
@@ -117,6 +119,7 @@ def main() -> None:
         )
         from racer_rmappo.isaac_scenarios import apply_navigation_scenario
         from racer_rmappo.trainer import RMAPPOTrainer
+        from racer_rmappo.policy_contract import checkpoint_policy
 
         isaac_cfg = apply_navigation_scenario(base_isaac_cfg, args.scenario)
         scenario_cfg = isaac_cfg["navigation_backend"]["scenarios"][args.scenario]
@@ -128,6 +131,13 @@ def main() -> None:
             )
         validate_probe_config(isaac_cfg)
         cfg = apply_curriculum_stage(load_config(args.rmappo_config), stage_name)
+        checkpoint_metadata = torch.load(checkpoint_path, map_location="cpu")
+        cfg["policy"] = {"version": checkpoint_policy(checkpoint_metadata)}
+        # Architecture belongs to the checkpoint, not the current YAML default.
+        saved_cfg = checkpoint_metadata.get("config", {})
+        if "ppo" in saved_cfg:
+            cfg["ppo"]["recurrent_hidden_size"] = saved_cfg["ppo"]["recurrent_hidden_size"]
+        del checkpoint_metadata
         cfg["training"]["backend"] = "isaac"
         cfg["training"]["device"] = str(isaac_cfg["sim"]["device"])
         cfg["training"]["num_parallel_swarms"] = 1
@@ -158,6 +168,17 @@ def main() -> None:
         )
         if recorder is not None:
             result["diagnostics"] = recorder.summary()
+        result["physics_timing"] = probe.timing.report()
+        if not result["physics_timing"]["valid"]:
+            raise RuntimeError("invalid physics timing; this is not a valid policy evaluation")
+        result["run_completed"] = True
+        result["policy_version"] = trainer.policy_version
+        result["coverage_available"] = False
+        result["curriculum_passed"] = (
+            result["episode_count"] >= 50
+            and result["collision_free_success_rate"] >= 0.90
+            and result["out_of_bounds_episode_rate"] == 0.0
+        )
         result.update(
             {
                 "schema_version": 1,
@@ -177,8 +198,15 @@ def main() -> None:
         print(json.dumps(result, indent=2, sort_keys=True), flush=True)
         print(f"P3_ISAAC_PPO_EVAL_REPORT={output_path}", flush=True)
         print("P3_ISAAC_PPO_EVAL_RUN_RESULT=PASS", flush=True)
+        print("P3_ISAAC_PPO_CURRICULUM_RESULT=" + ("PASS" if result["curriculum_passed"] else "NOT_PASSED"), flush=True)
     except BaseException:
         print("P3_ISAAC_PPO_EVAL_RUN_RESULT=FAIL", flush=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps({
+            "run_completed": False, "curriculum_passed": False,
+            "exception": traceback.format_exc(),
+            "physics_timing": probe.timing.report() if probe is not None and hasattr(probe, "timing") else None,
+        }, indent=2), encoding="utf-8")
         traceback.print_exc()
         raise
     finally:

@@ -71,7 +71,7 @@ def main():
     attitude.set(title="Absolute yaw error (solid) and tilt (dotted)", ylabel="rad")
     reward.set(title="Per-step reward (including terminal events)", ylabel="reward")
     for ax in (dist, speed, altitude, attitude, reward):
-        ax.set_xlabel("episode simulation time [s]")
+        ax.set_xlabel("episode control time [s] (nominal; verify timing audit)")
     for ax in axes.flatten():
         ax.grid(True, alpha=.2)
     if len(episodes) <= 10:

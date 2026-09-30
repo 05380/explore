@@ -239,6 +239,7 @@ class IsaacSingleDroneProbe:
         validate_probe_config(cfg)
         self.cfg = dict(cfg)
         self.render = bool(render)
+        self.render_on_step = self.render
 
         # These imports must remain after SimulationApp is constructed.
         from omni.isaac.core.simulation_context import SimulationContext
@@ -353,6 +354,13 @@ class IsaacSingleDroneProbe:
         self.controller = LeePositionController(
             g=9.81, uav_params=self.drone.params
         ).to(self.device)
+        from .physics_timing import PhysicsTimingAudit
+        self.timing = PhysicsTimingAudit(
+            self.physics_dt, cfg["control"]["physics_steps_per_action"]
+        )
+        self.sim.add_physics_callback("racer_physics_audit", self.timing.on_physics_step)
+        self.depth_camera.render_frame = self.render_frame
+        self.last_rotor_action = None
         self.env_ids = torch.tensor([0], dtype=torch.long, device=self.device)
         self.zero_velocities = torch.zeros(1, 1, 6, device=self.device)
 
@@ -441,6 +449,10 @@ class IsaacSingleDroneProbe:
         if physics_view is not None:
             physics_view.flush()
 
+    def render_frame(self) -> None:
+        """Use Kit's render-only path; fail closed if the installed build steps physics."""
+        self.timing.render_only(self.sim.render)
+
     def reset(self) -> Dict[str, Any]:
         self._initial_reset_available = False
         self.drone._reset_idx(self.env_ids, train=False)
@@ -518,6 +530,7 @@ class IsaacSingleDroneProbe:
         finite = True
         max_contact_force = 0.0
         telemetry = self.telemetry()
+        sync_start = self.timing.physics_steps
         for _ in range(int(control_steps)):
             telemetry, _ = self.step((0.0, 0.0, 0.0, 0.0))
             latched_collision |= bool(telemetry["collision"])
@@ -526,6 +539,8 @@ class IsaacSingleDroneProbe:
             max_contact_force = max(
                 max_contact_force, float(telemetry["max_contact_force_n"])
             )
+
+        self.timing.reset_sync_steps += self.timing.physics_steps - sync_start
 
         self.drone.set_velocities(self.zero_velocities)
         self.last_world_velocity_command.zero_()
@@ -573,6 +588,7 @@ class IsaacSingleDroneProbe:
         }
 
     def step(self, command: Tensor | Sequence[float]) -> tuple[Dict[str, Any], Tensor]:
+        timing_before = self.timing.snapshot()
         raw = torch.as_tensor(command, dtype=torch.float32, device=self.device)
         command_limited = limit_velocity_command(
             raw, self.max_speed, self.max_yaw_rate
@@ -644,11 +660,13 @@ class IsaacSingleDroneProbe:
                 target_vel=command_world_velocity,
                 target_yaw=self.target_yaw,
             )
+            self.timing.controller_updates += 1
+            self.last_rotor_action = rotor_action.detach().clone()
             self.drone.apply_action(rotor_action)
-            render_this_step = (
-                self.render and physics_step + 1 == self.physics_steps_per_action
-            )
-            self.sim.step(render=render_this_step)
+            self.timing.force_applications += 1
+            # GUI and headless MUST take the same one-physics-step path.
+            # step(render=True) may advance a full rendering interval in Kit.
+            self.sim.step(render=False)
 
             substep_state = self._state()
             substep_position = substep_state[..., :3].reshape(-1, 3)[0]
@@ -681,6 +699,17 @@ class IsaacSingleDroneProbe:
             (command_world_velocity, yaw_rate_command), dim=0
         )
         telemetry = self.telemetry()
+        telemetry["timing_step"] = self.timing.verify_action(timing_before)
+        if self.render_on_step:
+            self.render_frame()
+        telemetry["physics_time_s"] = self.timing.physics_time_s
+        telemetry["physics_step_count"] = self.timing.physics_steps
+        telemetry["rotor_action"] = self.last_rotor_action.reshape(-1).cpu().tolist()
+        telemetry["rotor_thrust_n"] = self.drone.thrusts[..., 2].reshape(-1).detach().cpu().tolist()
+        telemetry["controller_reference_position_m"] = self.target_position.reshape(3).detach().cpu().tolist()
+        telemetry["velocity_command_limited"] = bool((raw.reshape(4)[:3].norm() > self.max_speed).item())
+        telemetry["yaw_rate_command_limited"] = bool((raw.reshape(4)[3].abs() > self.max_yaw_rate).item())
+        telemetry["limited_command_body"] = command_limited.detach().cpu().tolist()
         telemetry["max_contact_force_n"] = float(max_contact_force.item())
         telemetry["collision"] = bool(collision_any.item())
         telemetry["out_of_bounds"] = bool(out_of_bounds_any.item())
@@ -1191,5 +1220,6 @@ class IsaacSingleDroneProbe:
             "control_dt_s": self.control_dt,
             "control_hz": self.control_hz,
             "physics_steps_per_action": self.physics_steps_per_action,
+            "physics_timing": self.timing.report(),
             "probes": probes,
         }

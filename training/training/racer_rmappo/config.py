@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 import yaml
+from .policy_contract import policy_version
+from .rule_goals import RuleGoalSelector
 
 
 DEFAULT_CONFIG = (
@@ -37,6 +39,8 @@ def _positive(mapping: Mapping[str, Any], key: str) -> float:
 
 
 def validate_config(cfg: Mapping[str, Any]) -> None:
+    policy_version(cfg)
+    RuleGoalSelector(**cfg.get("rule_goal", {}))
     required = ("experiment", "world", "camera", "actor_observation", "action", "reward", "ppo", "training", "curriculum")
     missing = [name for name in required if name not in cfg]
     if missing:

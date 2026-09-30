@@ -111,6 +111,9 @@ class EvaluationTrace:
         row.update(type="step", step=step, episode=self.episode,
                    sim_time_s=step * self.dt,
                    episode_time_s=snapshot["episode_step"] * self.dt)
+        # sim_time_s remains the historical nominal clock. physics_time_s and
+        # timing_step are measured from PhysX callbacks, including reset sync.
+        row["nominal_sim_time_s"] = row["sim_time_s"]
         row["overspeed"] = row["actual_speed_mps"] > self.speed_limit + 0.05
         self.overspeed_steps += int(row["overspeed"])
         self.navigation_steps += int(row["navigation_reached"])
@@ -220,7 +223,8 @@ class IsaacEvaluationViewer:
             f"Body velocity/yaw command: {tuple(round(v, 3) for v in row['command_body'])}\n"
             f"Distance: {row['target_distance_m']:.3f} / {nav['goal_position_tolerance_m']:.2f} m\n"
             f"Yaw error: {row['target_yaw_error_rad']:.3f} rad  tilt: {row['body_tilt_rad']:.3f} rad\n"
-            f"At position: {row['navigation_reached']}  completed: {row['observation_completed']}\n"
+            f"At position: {row['navigation_reached']}  pose: {row.get('navigation_pose_reached', False)}\n"
+            f"Map observation completed: {row['observation_completed']}\n"
             f"Reward: {row['reward']:.4f}  Last end: {self.last_end}\n"
             "Cyan: trajectory; green sphere: goal tolerance\n"
             "Magenta: actual velocity; green vector: filtered command (1s scale)\n"
@@ -228,8 +232,8 @@ class IsaacEvaluationViewer:
             "Explored voxels / coverage: NOT IMPLEMENTED\n"
             "At episode end, HUD/trace show terminal state; drone may already reset."
         )
-        # Render only: do not advance physics or replace the actor's sensor.
-        self.probe.sim.render()
+        # Only queue drawing data. The next centrally scheduled camera render
+        # presents it; GUI callbacks must not tick Kit or the physical world.
 
     def close(self):
         try:

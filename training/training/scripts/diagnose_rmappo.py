@@ -35,6 +35,7 @@ def command_output(command):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--check-ros", action="store_true", help="optional historical ROS contract")
     args = parser.parse_args()
     report = {
         "platform": platform.platform(),
@@ -48,7 +49,7 @@ def main() -> None:
     }
     try:
         from racer_rmappo.config import load_config
-        from check_ros_training_config import check_contract
+        from racer_rmappo.policy_contract import policy_spec, policy_version
 
         cfg = load_config(args.config)
         report["config"] = {
@@ -60,9 +61,11 @@ def main() -> None:
             "obstacle_inflation_m": cfg["world"]["obstacle_inflation_m"],
             "speed_norm_mps": cfg["action"]["physical_limits"]["speed_norm_mps"],
             "max_candidates": cfg["actor_observation"]["racer_candidates"]["max_candidates"],
-            "hybrid_action_fields": 9,
+            "policy_spec": policy_spec(policy_version(cfg)),
         }
-        report["ros_training_contract"] = check_contract(cfg)
+        if args.check_ros:
+            from check_ros_training_config import check_contract
+            report["ros_training_contract"] = check_contract(cfg)
     except Exception as exc:
         report["config"] = {"valid": False, "error": str(exc)}
     print(json.dumps(report, indent=2, ensure_ascii=False))

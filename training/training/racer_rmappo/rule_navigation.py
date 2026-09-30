@@ -18,10 +18,10 @@ def proportional_navigation_action(
     yaw_gain: float,
     max_cruise_speed_mps: float,
 ) -> Tensor:
-    """Convert the actor target feature into a bounded hybrid action.
+    """Convert the actor target feature into a bounded four-field action.
 
     This is an acceptance-test controller, not an expert policy and not a PPO
-    training target. Candidate selection/residual components remain zero.
+    training target. There are no candidate selection/residual components.
     """
     if position_gain <= 0.0 or yaw_gain <= 0.0:
         raise ValueError("controller gains must be positive")
@@ -73,7 +73,7 @@ def proportional_navigation_action(
         action_limits["yaw_rate_rps"]
     )
 
-    action = torch.zeros(*target.shape[:-1], 9, dtype=target.dtype, device=target.device)
+    action = torch.zeros(*target.shape[:-1], 4, dtype=target.dtype, device=target.device)
     action[..., :3] = normalized_velocity.clamp(-1.0, 1.0)
     action[..., 3] = normalized_yaw_rate.clamp(-1.0, 1.0)
     return action

@@ -1,4 +1,4 @@
-> 当前实施路线（2026-09-28）：训练、评估与最终仿真均在 Isaac Sim 内完成；RACER 提供规则算法参考，ROS 不再是前置步骤。详细阶段、代码模块、参数、测试与验收见 [Isaac Sim 协同探索实施计划](ISAAC_RMAPPO_实施计划.md)。本文件保留历史讨论，涉及 ROS 优先顺序的旧内容已归档。
+> 当前实施路线（2026-09-30）：规则选局部目标，PPO 只学四维避障导航；训练、评估均在 Isaac Sim。操作见 [navigation_v2](training/NAVIGATION_V2.md)，阶段见 [实施计划](ISAAC_RMAPPO_实施计划.md)。下文为历史讨论，候选头学习、残差、选择 mask 和 ROS 优先路线不再适用于当前方案。
 
 1、替换transformer
 

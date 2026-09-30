@@ -1,5 +1,9 @@
 # P3：单机局部导航课程与墙体绕障验收
 
+**当前入口：** [navigation_v2 改造与验收](NAVIGATION_V2.md)。GUI 下坠问题须先过三模式物理一致性验收。
+新训练永久采用规则给定目标与四维 actor，旧九维 checkpoint 仅供评估。本文后续旧模型路径和同步清单
+是此前实验记录；新文件同步、验收及训练请使用上面文档，避免覆盖 `runs/` 与 `third_party/`。
+
 2026-09-30 更新：`open_target` 10k 评估尚未通过，先按本文末尾“评估可视化与逐步诊断”
 检查目标附近运动与超速，再决定续训；暂不进入 wall_edge。
 
@@ -19,7 +23,7 @@ P2 已验证物理、固定机身 D455M、backend、episode reset 和进程关�
 ## 训练边界
 
 - PPO 输出仍只有 `vx_body、vy_body、vz_body、yaw_rate`；
-- `decision_mask=0`，候选观测点选择头不参与本阶段训练；
+- navigation_v2 没有候选选择头或 decision_mask；hybrid_v1 仅在旧模型评估中屏蔽该分支；
 - PPO 每次只收到当前课程的一个局部目标；
 - `--scenario` 自动选择匹配的 RMAPPO stage，不需要再手工配对 `--stage`；
 - `validation_waypoints_m` 仅由确定性可达性探针读取，不进入 observation、reward、训练

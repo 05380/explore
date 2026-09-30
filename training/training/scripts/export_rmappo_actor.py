@@ -17,7 +17,8 @@ if str(TRAINING_PACKAGE) not in sys.path:
     sys.path.insert(0, str(TRAINING_PACKAGE))
 
 from racer_rmappo.config import apply_curriculum_stage, load_config
-from racer_rmappo.model import SharedRecurrentActor
+from racer_rmappo.model import SharedRecurrentActor, NavigationRecurrentActor
+from racer_rmappo.policy_contract import NAVIGATION, checkpoint_policy, policy_spec
 
 
 class DeploymentActor(nn.Module):
@@ -41,6 +42,18 @@ class DeploymentActor(nn.Module):
         return action, next_hidden
 
 
+class NavigationDeploymentActor(nn.Module):
+    def __init__(self, actor):
+        super().__init__()
+        self.actor = actor
+
+    def forward(self, depth, ego, target, neighbors, hidden):
+        action, _, _, next_hidden = self.actor.step(
+            dict(depth=depth, ego=ego, target=target, neighbors=neighbors), hidden,
+            deterministic=True)
+        return action, next_hidden
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint", type=Path)
@@ -49,15 +62,19 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
     cfg = apply_curriculum_stage(load_config(args.config), "single_agent_sparse_static")
+    checkpoint = torch.load(args.checkpoint.expanduser(), map_location=args.device)
+    version = checkpoint_policy(checkpoint)
+    if args.config is None:
+        cfg = checkpoint["config"]
     ppo = cfg["ppo"]
     frame_stack = int(cfg["actor_observation"]["depth"]["frame_stack"])
-    actor = SharedRecurrentActor(
+    actor_class = NavigationRecurrentActor if version == NAVIGATION else SharedRecurrentActor
+    actor = actor_class(
         frame_stack=frame_stack, hidden_size=int(ppo["recurrent_hidden_size"])
     ).to(args.device)
-    checkpoint = torch.load(args.checkpoint.expanduser(), map_location=args.device)
     actor.load_state_dict(checkpoint["actor"])
     actor.eval()
-    wrapper = DeploymentActor(actor)
+    wrapper = NavigationDeploymentActor(actor) if version == NAVIGATION else DeploymentActor(actor)
     height = int(cfg["actor_observation"]["depth"]["resize"][1])
     width = int(cfg["actor_observation"]["depth"]["resize"][0])
     neighbors = int(cfg["actor_observation"]["neighbors"]["max_neighbors"])
@@ -71,11 +88,15 @@ def main() -> None:
         torch.ones(1, 1, 1, device=args.device),
         torch.zeros(1, 1, int(ppo["recurrent_hidden_size"]), device=args.device),
     )
+    if version == NAVIGATION:
+        examples = (*examples[:4], examples[-1])
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
         traced = torch.jit.trace(wrapper, examples, check_trace=True)
     traced.save(str(args.output))
     metadata = {
+        "policy_spec": policy_spec(version),
+        "input_order": policy_spec(version)["observation_keys"] + ["hidden"],
         "source_checkpoint": str(args.checkpoint.resolve()),
         "depth": cfg["actor_observation"]["depth"],
         "camera": cfg["camera"],
@@ -85,6 +106,10 @@ def main() -> None:
         "candidate_fields": cfg["actor_observation"]["racer_candidates"]["fields"],
         "neighbor_fields": cfg["actor_observation"]["neighbors"]["fields"],
     }
+    if version == NAVIGATION:
+        metadata.pop("candidate_fields")
+        metadata["action"] = dict(cfg["action"])
+        metadata["action"].pop("viewpoint_selection", None)
     args.output.with_suffix(args.output.suffix + ".json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8"
     )

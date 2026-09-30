@@ -14,11 +14,16 @@ import torch
 from torch import Tensor
 
 from .reward import RewardComposer
+from .policy_contract import NAVIGATION, policy_version, policy_spec
+from .rule_goals import GoalCandidate, RuleGoalSelector
 
 
 class ContractSmokeEnv:
     def __init__(self, cfg: Mapping[str, object], device: torch.device | str) -> None:
         self.cfg = cfg
+        self.policy_version = policy_version(cfg)
+        self.action_dim = policy_spec(self.policy_version)["action_dim"]
+        self.coverage_available = False  # Synthetic bookkeeping, not an Isaac map.
         self.device = torch.device(device)
         self.num_envs = int(cfg["training"]["num_parallel_swarms"])
         self.num_agents = int(cfg["experiment"]["num_agents"])
@@ -34,7 +39,7 @@ class ContractSmokeEnv:
         self.candidate_cfg = cfg["actor_observation"]["racer_candidates"]
         self.selection_cfg = cfg["action"]["viewpoint_selection"]
         self.action_limits = cfg["action"]["physical_limits"]
-        self.reward_composer = RewardComposer(cfg["reward"])
+        self.reward_composer = RewardComposer(cfg["reward"], navigation_only=self.policy_version == NAVIGATION)
         self.max_steps = int(cfg["training"].get("smoke_episode_steps", 512))
         self.max_obstacles = int(cfg["training"].get("smoke_max_obstacles", 32))
         self.frame_stack = int(self.depth_cfg["frame_stack"])
@@ -58,6 +63,7 @@ class ContractSmokeEnv:
         self.velocities = torch.zeros_like(self.positions)
         self.yaw = torch.zeros(self.num_envs, self.num_agents, device=self.device)
         self.targets = torch.zeros_like(self.positions)
+        self.goal_active = torch.ones(self.num_envs, self.num_agents, dtype=torch.bool, device=self.device)
         self.target_yaw = torch.zeros(self.num_envs, self.num_agents, device=self.device)
         self.candidate_positions = torch.zeros(
             self.num_envs, self.num_agents, self.max_candidates, 3, device=self.device
@@ -160,6 +166,10 @@ class ContractSmokeEnv:
         """Generate fixed RACER-like candidate sets for new decision events."""
         for env_id, agent_id in torch.nonzero(task_mask, as_tuple=False).tolist():
             points = self._random_positions(self.max_candidates)
+            if self.policy_version == NAVIGATION:
+                origin = self.positions[env_id, agent_id]
+                offsets = points - origin
+                points = origin + offsets * (7.9 / offsets.norm(dim=-1, keepdim=True).clamp_min(1e-6)).clamp(max=1.0)
             delta = points[:, None, :2] - self.obstacle_position[env_id, None, :, :]
             clearance = delta.norm(dim=-1) - self.obstacle_radius[env_id].unsqueeze(0)
             above = points[:, None, 2] > self.obstacle_height[env_id].unsqueeze(0)
@@ -167,7 +177,7 @@ class ContractSmokeEnv:
             valid = clearance.min(dim=-1).values > (
                 self.drone_radius + float(self.cfg["world"]["obstacle_inflation_m"])
             )
-            if not bool(valid.any()):
+            if not bool(valid.any()) and self.policy_version != NAVIGATION:
                 points[0] = self.positions[env_id, agent_id]
                 valid[0] = True
             yaws = (torch.rand(self.max_candidates, device=self.device) * 2.0 - 1.0) * math.pi
@@ -182,10 +192,29 @@ class ContractSmokeEnv:
             self.candidate_yaws[env_id, agent_id] = yaws
             self.candidate_gains[env_id, agent_id] = gains
             self.candidate_valid[env_id, agent_id] = valid
-            first = int(torch.nonzero(valid, as_tuple=False)[0].item())
+            if self.policy_version == NAVIGATION:
+                # Deliberately synthetic contract fixtures, not a real map provider.
+                selector = RuleGoalSelector(**self.cfg.get("rule_goal", {}))
+                origin = self.positions[env_id, agent_id].cpu().tolist()
+                candidates = [GoalCandidate(
+                    str(i), tuple(points[i].cpu().tolist()), float(yaws[i]), float(gains[i]),
+                    math.dist(points[i].cpu().tolist(), origin), True, bool(valid[i]),
+                    bool(valid[i]), bool(valid[i]), source="synthetic_smoke"
+                ) for i in range(self.max_candidates)]
+                selected = selector.select(candidates, origin, float(self.yaw[env_id, agent_id]), 0.0)
+                self.goal_active[env_id, agent_id] = selected is not None
+                self.task_decision[env_id, agent_id] = False
+                self.stall_count[env_id, agent_id] = 0
+                if selected is None:
+                    self.targets[env_id, agent_id] = self.positions[env_id, agent_id]
+                    self.target_yaw[env_id, agent_id] = self.yaw[env_id, agent_id]
+                    continue
+                first = int(selected.goal_id)
+            else:
+                first = int(torch.nonzero(valid, as_tuple=False)[0].item())
             self.targets[env_id, agent_id] = points[first]
             self.target_yaw[env_id, agent_id] = yaws[first]
-            self.task_decision[env_id, agent_id] = True
+            self.task_decision[env_id, agent_id] = self.policy_version != NAVIGATION
 
     def reset(self) -> Tuple[Dict[str, Tensor], Tensor]:
         self._reset_envs(torch.arange(self.num_envs, device=self.device))
@@ -373,7 +402,7 @@ class ContractSmokeEnv:
             ),
             dim=-1,
         )
-        return {
+        observation = {
             "depth": self.depth_stack.clone(),
             "ego": ego,
             "target": target,
@@ -381,6 +410,10 @@ class ContractSmokeEnv:
             "candidates": candidates,
             "decision_mask": self.task_decision.float().unsqueeze(-1),
         }
+        if self.policy_version == NAVIGATION:
+            observation.pop("candidates")
+            observation.pop("decision_mask")
+        return observation
 
     def _coverage(self) -> Tensor:
         return self.team_seen.float().mean(dim=-1)
@@ -533,6 +566,15 @@ class ContractSmokeEnv:
         return result
 
     def step(self, hybrid_action: Tensor):
+        expected = (self.num_envs, self.num_agents, self.action_dim)
+        if tuple(hybrid_action.shape) != expected or not torch.isfinite(hybrid_action).all():
+            raise ValueError(f"{self.policy_version} requires finite action shape {expected}")
+        if self.policy_version == NAVIGATION:
+            # Reuse the synthetic integrator, not the learned legacy selector.
+            # Rule goals are already in the actor observation before this call.
+            hybrid_action = torch.cat((hybrid_action, torch.zeros(
+                self.num_envs, self.num_agents, 5, device=self.device)), -1)
+            self.task_decision.zero_()
         if hybrid_action.shape[-1] != 9:
             raise ValueError(f"hybrid action must have 9 fields, got {hybrid_action.shape[-1]}")
         raw_action = hybrid_action[..., :4]
@@ -641,6 +683,8 @@ class ContractSmokeEnv:
         navigation_reached = new_distance <= self.goal_distance_m
         heading_reached = yaw_error <= self.goal_yaw_rad
         goal_reached = navigation_reached & heading_reached
+        if self.policy_version == NAVIGATION:
+            goal_reached &= self.goal_active
         self._generate_tasks(goal_reached)
         milestone = self._coverage_milestone_reward(old_coverage, new_coverage)
         signals = {

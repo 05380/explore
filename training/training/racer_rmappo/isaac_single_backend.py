@@ -1,10 +1,9 @@
 """Single-agent fixed-target contract for the first Isaac navigation stage.
 
-This module contains no eager Omniverse imports.  A caller that already owns a
-``SimulationApp`` creates :class:`IsaacSingleDroneProbe` and injects it here.
-The backend deliberately disables viewpoint selection: candidate zero mirrors
-the fixed target, while ``decision_mask`` stays zero so PPO only optimizes the
-four-dimensional navigation action during this curriculum stage.
+This module contains no eager Omniverse imports. A SimulationApp owner injects
+IsaacSingleDroneProbe here. navigation_v2 only exposes four navigation actions
+and a rule-provided target. Legacy evaluation supplies candidate zero plus a
+zero decision mask solely to load historical hybrid_v1 checkpoints.
 """
 
 from __future__ import annotations
@@ -18,6 +17,8 @@ from torch import Tensor
 
 from .d455m_sensor import depth_to_normalized_inverse, resize_inverse_depth_for_actor
 from .reward import RewardComposer
+from .policy_contract import NAVIGATION, policy_version, policy_spec
+from .rule_goals import FixedGoalProvider, LocalGoal
 
 
 def wrap_angle(angle: Tensor) -> Tensor:
@@ -87,8 +88,14 @@ class IsaacSingleNavigationBackend:
         probe: Any,
     ) -> None:
         self.cfg = cfg
+        self.policy_version = policy_version(cfg)
+        self.action_dim = policy_spec(self.policy_version)["action_dim"]
+        self.coverage_available = False
         self.isaac_cfg = isaac_cfg
         self.probe = probe
+        # Camera capture owns rendering in this backend. No second GUI render.
+        if hasattr(probe, "render_on_step"):
+            probe.render_on_step = False
         # Opt-in evaluation telemetry. Never changes the policy observation.
         self.collect_diagnostics = False
         self.last_depth_summary = {}
@@ -115,8 +122,13 @@ class IsaacSingleNavigationBackend:
         self.candidate_cfg = cfg["actor_observation"]["racer_candidates"]
         self.neighbor_cfg = cfg["actor_observation"]["neighbors"]
         self.action_limits = cfg["action"]["physical_limits"]
-        self.reward_composer = RewardComposer(cfg["reward"])
+        self.reward_composer = RewardComposer(cfg["reward"], navigation_only=self.policy_version == NAVIGATION)
         navigation = isaac_cfg["navigation_backend"]
+        self.goal_provider = FixedGoalProvider(
+            navigation["fixed_target_position_m"], navigation["fixed_target_yaw_rad"]
+        )
+        self.local_goal = self.goal_provider.reset()
+        self.pending_goal = None
         self.target_position = torch.tensor(
             navigation["fixed_target_position_m"],
             dtype=torch.float32,
@@ -299,7 +311,7 @@ class IsaacSingleNavigationBackend:
         candidates[0, 0, 0, 6] = 0.0
         candidates[0, 0, 0, 7] = 0.0
         candidates[0, 0, 0, 8] = 1.0
-        return {
+        observation = {
             "depth": self.depth_stack.clone(),
             "ego": ego,
             "target": target,
@@ -311,6 +323,29 @@ class IsaacSingleNavigationBackend:
             # residual log-probabilities must not enter PPO in this curriculum.
             "decision_mask": torch.zeros(1, 1, 1, device=self.device),
         }
+        if self.policy_version == NAVIGATION:
+            observation.pop("candidates")
+            observation.pop("decision_mask")
+        return observation
+
+    def queue_local_goal(self, goal: LocalGoal) -> None:
+        """Publish at the next observation boundary, never midway through an action.
+
+        The pending goal becomes visible AFTER the current action's reward is
+        computed against the old goal. Rules must use this API rather than
+        writing target tensors after an actor observation has been issued.
+        No valid candidate: the selector returns None; do not fabricate a goal.
+        """
+        if not isinstance(goal, LocalGoal) or not goal.valid:
+            raise ValueError("queue_local_goal requires a valid LocalGoal")
+        self.pending_goal = goal
+
+    def _activate_goal(self, goal):
+        self.local_goal = goal
+        self.target_position.copy_(torch.tensor(goal.position_m, device=self.device))
+        self.target_yaw.fill_(goal.yaw_rad)
+        self.position_history.clear()
+        self.position_history.append(torch.tensor(self.last_telemetry["position_m"], device=self.device))
 
     def _critic_state(self) -> Tensor:
         position, _, velocity, _, _, _ = self._telemetry_tensors(
@@ -357,6 +392,8 @@ class IsaacSingleNavigationBackend:
             self.reset_pose_sync_control_steps
         )
         self.step_count = 0
+        self.pending_goal = None
+        self._activate_goal(self.goal_provider.reset())
         self.previous_action.zero_()
         self.position_history.clear()
         position = torch.tensor(
@@ -381,10 +418,12 @@ class IsaacSingleNavigationBackend:
         action = torch.as_tensor(
             hybrid_action, dtype=torch.float32, device=self.device
         )
-        if tuple(action.shape) != (1, 1, 9):
+        if tuple(action.shape) != (1, 1, self.action_dim):
             raise ValueError(
-                f"single Isaac hybrid action must have shape (1,1,9), got {tuple(action.shape)}"
+                f"{self.policy_version} action must have shape (1,1,{self.action_dim}), got {tuple(action.shape)}"
             )
+        if not torch.isfinite(action).all():
+            raise ValueError("navigation action must be finite")
         raw_navigation = action[..., :4]
         bounded_navigation = raw_navigation.clamp(-1.0, 1.0)
         safety_takeover = bool((raw_navigation.abs() > 1.0).any().item())
@@ -418,7 +457,9 @@ class IsaacSingleNavigationBackend:
         heading_reached = yaw_error.abs() <= self.goal_yaw_rad
         tilt = torch.sqrt(roll.square() + pitch.square())
         tilt_reached = tilt <= self.goal_tilt_rad
-        observation_completed = navigation_reached & heading_reached & tilt_reached
+        navigation_pose_reached = navigation_reached & heading_reached & tilt_reached
+        # There is no map fusion yet. Processing a depth frame is NOT mapping.
+        observation_completed = torch.zeros_like(navigation_reached)
         collision = bool(telemetry["collision"])
         out_of_bounds = bool(telemetry["out_of_bounds"])
         stall = False
@@ -441,7 +482,7 @@ class IsaacSingleNavigationBackend:
         )
         signals = {
             "target_progress_m": (old_distance - new_distance).reshape(shape),
-            "goal_reached": observation_completed.reshape(shape),
+            "goal_reached": navigation_pose_reached.reshape(shape),
             "local_new_voxels": torch.zeros(shape, device=self.device),
             "team_unique_new_voxels": torch.zeros(shape, device=self.device),
             "duplicate_voxels": torch.zeros(shape, device=self.device),
@@ -473,13 +514,13 @@ class IsaacSingleNavigationBackend:
         done_value = (
             collision
             or out_of_bounds
-            or bool(observation_completed.item())
+            or bool(navigation_pose_reached.item())
             or timeout
             or (stall and self.terminate_on_stall)
         )
         success = (
             done_value
-            and bool(observation_completed.item())
+            and bool(navigation_pose_reached.item())
             and not self.episode_collision
             and not self.episode_out_of_bounds
         )
@@ -494,7 +535,7 @@ class IsaacSingleNavigationBackend:
             "out_of_bounds": torch.tensor([float(out_of_bounds)], device=self.device),
             "stall": torch.tensor([float(stall)], device=self.device),
             "safety_takeover": torch.tensor([float(safety_takeover)], device=self.device),
-            "goal_reached": observation_completed.float().reshape(1),
+            "goal_reached": navigation_pose_reached.float().reshape(1),
             "navigation_reached": navigation_reached.float().reshape(1),
             "viewpoint_decisions": torch.zeros(1, device=self.device),
             "episode_finished": torch.tensor([episode_finished], device=self.device),
@@ -522,6 +563,9 @@ class IsaacSingleNavigationBackend:
             "coverage_target_steps": torch.zeros(1, device=self.device),
             # Extra diagnostics are allowed beyond REQUIRED_STEP_INFO.
             "observation_completed": observation_completed.float().reshape(1),
+            "navigation_pose_reached": navigation_pose_reached.float().reshape(1),
+            "new_frame_processed": torch.ones(1, device=self.device),
+            "coverage_available": False,
             "target_distance_m": new_distance.reshape(1),
             "target_yaw_error_rad": yaw_error.abs().reshape(1),
             "body_tilt_rad": tilt.reshape(1),
@@ -552,7 +596,20 @@ class IsaacSingleNavigationBackend:
                 "target_yaw_error_rad": float(yaw_error),
                 "body_tilt_rad": float(tilt),
                 "navigation_reached": bool(navigation_reached),
+                "navigation_pose_reached": bool(navigation_pose_reached),
+                "new_frame_processed": True,
                 "observation_completed": bool(observation_completed),
+                "goal_id": self.local_goal.goal_id,
+                "goal_source": self.local_goal.source,
+                "goal_switch_reason": self.local_goal.switch_reason,
+                "physics_time_s": telemetry.get("physics_time_s"),
+                "physics_step_count": telemetry.get("physics_step_count"),
+                "timing_step": telemetry.get("timing_step"),
+                "rotor_action": telemetry.get("rotor_action"),
+                "rotor_thrust_n": telemetry.get("rotor_thrust_n"),
+                "velocity_command_limited": telemetry.get("velocity_command_limited", False),
+                "yaw_rate_command_limited": telemetry.get("yaw_rate_command_limited", False),
+                "limited_command_body": telemetry.get("limited_command_body"),
                 "action_navigation": bounded_navigation.reshape(4).detach().cpu().tolist(),
                 "command_body": command.detach().cpu().tolist(),
                 "applied_command_world": applied_command.reshape(4).detach().cpu().tolist(),
@@ -575,6 +632,9 @@ class IsaacSingleNavigationBackend:
         if done_value:
             observation, critic_state = self.reset()
         else:
+            if self.pending_goal is not None:
+                self._activate_goal(self.pending_goal)
+                self.pending_goal = None
             observation, critic_state = self._observation(), self._critic_state()
         return observation, critic_state, reward, done, info
 

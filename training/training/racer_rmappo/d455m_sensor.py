@@ -192,6 +192,7 @@ class FixedBodyD455MSensor:
         validate_d455m_config(cfg)
         self.cfg = dict(cfg)
         self.sim = simulation_context
+        self.render_frame = self.sim.render
         self.prim_path = f"{parent_prim_path}/{cfg.get('prim_name', 'D455M')}"
         self.render_product_path: str | None = None
         self.annotators: Dict[str, Any] = {}
@@ -279,7 +280,7 @@ class FixedBodyD455MSensor:
             else warmup_frames
         )
         for _ in range(max(frames, 1)):
-            self.sim.render()
+            self.render_frame()
         height = int(self.cfg["height"])
         width = int(self.cfg["width"])
         return {

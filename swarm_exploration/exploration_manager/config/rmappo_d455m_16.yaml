@@ -43,6 +43,18 @@ camera:
   cx: 319.5
   cy: 179.5
 
+policy:
+  version: navigation_v2
+
+# Pure rule selector; the Isaac fixed-target curriculum is not a frontier map.
+rule_goal:
+  max_radius_m: 8.0
+  inflation_m: 0.5
+  cruise_mps: 1.0
+  yaw_rate_rps: 1.0
+  overhead_s: 1.0
+  cooldown_s: 10.0
+
 actor_observation:
   depth:
     representation: inverse_depth
@@ -55,6 +67,7 @@ actor_observation:
   selected_target:
     fields: [relative_body_xyz, relative_distance, target_yaw_sin_cos, return_home]
     distance_normalizer_m: 20.0
+  # Legacy evaluation / internal smoke fixtures only, never navigation_v2 actor input.
   racer_candidates:
     max_candidates: 16
     fields: [relative_body_xyz, relative_distance, yaw_sin_cos, visible_gain, frontier_rank, valid]
@@ -72,6 +85,7 @@ action:
   message: geometry_msgs/TwistStamped
   normalized_range: [-1.0, 1.0]
   navigation_fields: [linear_x, linear_y, linear_z, angular_z]
+  # Historical hybrid_v1 contract. navigation_v2 does not output these fields.
   viewpoint_selection:
     fields: [candidate_index, offset_body_x, offset_body_y, offset_z, yaw_offset]
     decision_event: [new_task, target_reached, target_invalid, task_reallocated, target_timeout]
@@ -91,8 +105,8 @@ reward:
   out_of_bounds_terminal: -20.0
   goal_reached: 5.0
   target_progress_per_m: 2.5
-  # A small prior helps the high-level categorical head initially; actual
-  # information gain is still rewarded only when new voxels are observed.
+  # The following legacy exploration coefficients are inactive in navigation_v2.
+  # Keep them only to reproduce hybrid_v1 evaluations / historical ROS settings.
   viewpoint_visible_gain_prior: 0.10
   newly_observed_local_voxel: 0.02
   newly_observed_team_unique_voxel: 0.005
@@ -149,7 +163,7 @@ training:
   checkpoint_interval_updates: 50
   evaluation_interval_updates: 25
   log_interval_updates: 1
-  output_dir: training/runs/rmappo_d455m
+  output_dir: training/runs/navigation_v2_smoke
   terminate_team_on_agent_collision: true
   smoke_goal_distance_m: 1.0
   smoke_goal_yaw_rad: 0.25

@@ -14,7 +14,8 @@ import torch
 from torch import Tensor
 
 from .isaac_adapter import validate_backend_shapes, validate_step_info
-from .model import CentralizedCritic, SharedRecurrentActor
+from .model import CentralizedCritic, SharedRecurrentActor, NavigationRecurrentActor
+from .policy_contract import NAVIGATION, LEGACY, policy_version, policy_spec, checkpoint_policy
 from .smoke_env import ContractSmokeEnv
 from .storage import RolloutStorage, generalized_advantage_estimate
 
@@ -54,6 +55,7 @@ def build_backend(cfg: Mapping[str, object], device: torch.device):
 class RMAPPOTrainer:
     def __init__(self, cfg: Dict[str, object], backend=None) -> None:
         self.cfg = cfg
+        self.policy_version = policy_version(cfg)
         seed = int(cfg["training"]["seed"])
         set_seed(seed)
         self.device = resolve_device(str(cfg["training"]["device"]))
@@ -75,7 +77,8 @@ class RMAPPOTrainer:
                 )
         ppo = cfg["ppo"]
         depth = cfg["actor_observation"]["depth"]
-        self.actor = SharedRecurrentActor(
+        actor_class = NavigationRecurrentActor if self.policy_version == NAVIGATION else SharedRecurrentActor
+        self.actor = actor_class(
             frame_stack=int(depth["frame_stack"]),
             hidden_size=int(ppo["recurrent_hidden_size"]),
         ).to(self.device)
@@ -90,10 +93,10 @@ class RMAPPOTrainer:
         if not output.is_absolute():
             output = Path(__file__).resolve().parents[3] / output
         self.output_dir = output
-        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.metric_file = self.output_dir / "metrics.jsonl"
 
     def save(self, name: str) -> Path:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         path = self.output_dir / name
         torch.save(
             {
@@ -103,6 +106,7 @@ class RMAPPOTrainer:
                 "update_index": self.update_index,
                 "agent_transitions": self.agent_transitions,
                 "config": self.cfg,
+                "policy_spec": policy_spec(self.policy_version),
             },
             path,
         )
@@ -110,6 +114,16 @@ class RMAPPOTrainer:
 
     def load(self, path: str | Path, load_optimizer: bool = True) -> None:
         checkpoint = torch.load(Path(path).expanduser(), map_location=self.device)
+        version = checkpoint_policy(checkpoint)
+        if version != self.policy_version:
+            raise ValueError(f"checkpoint {version} != trainer {self.policy_version}; use legacy evaluation, not silent migration")
+        saved_cfg = checkpoint.get("config", {})
+        for section, key in (("actor_observation", "depth"), ("actor_observation", "selected_target"),
+                             ("action", "physical_limits")):
+            if saved_cfg.get(section, {}).get(key) != self.cfg[section][key]:
+                raise ValueError(f"checkpoint/runtime {section}.{key} mismatch")
+        if load_optimizer and version == LEGACY:
+            raise ValueError("hybrid_v1 checkpoints are evaluation-only; start navigation_v2 training afresh")
         self.actor.load_state_dict(checkpoint["actor"])
         self.critic.load_state_dict(checkpoint["critic"])
         if load_optimizer and "optimizer" in checkpoint:
@@ -354,6 +368,11 @@ class RMAPPOTrainer:
         return {key: value / max(update_count, 1) for key, value in loss_totals.items()}
 
     def train(self, total_environment_steps: int | None = None) -> Path:
+        if self.policy_version == LEGACY:
+            raise ValueError("hybrid_v1 is evaluation-only; train navigation_v2 instead")
+        if self.agent_transitions == 0 and (self.output_dir / "checkpoint_final.pt").exists():
+            raise FileExistsError("output already has a checkpoint; use --resume or a new output directory")
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         observation, critic_state = self.backend.reset()
         hidden = self.actor.initial_hidden(
             self.backend.num_envs, self.backend.num_agents, self.device
@@ -583,4 +602,5 @@ class RMAPPOTrainer:
             )
             result[f"{key[len('episode_'):]}_episode_count"] = episode_sums[key]
         result["collision_free_success_rate"] = result["success_episode_rate"]
+        result["coverage_available"] = getattr(self.backend, "coverage_available", True)
         return result
